@@ -694,3 +694,46 @@ fn test_acceptance_fullscreen_startup_preserves_maximized_state() {
 
     let _ = fs::remove_dir_all(&temp);
 }
+
+#[test]
+fn test_acceptance_sta_file_dialog_creation_and_options() {
+    std::thread::spawn(|| {
+        unsafe {
+            use windows::Win32::System::Com::*;
+            use windows::Win32::UI::Shell::*;
+
+            let res = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            assert!(res.is_ok(), "CoInitializeEx STA should succeed");
+
+            {
+                // Verify ImageDecoder works within STA thread
+                let decoder = kabaper::decode::ImageDecoder::new();
+                assert!(decoder.is_ok(), "ImageDecoder in STA should succeed");
+
+                // Verify IFileOpenDialog creation and options setup in STA
+                let open_dialog: windows::core::Result<IFileOpenDialog> =
+                    CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL);
+                assert!(open_dialog.is_ok(), "IFileOpenDialog instantiation should succeed");
+                let dialog = open_dialog.unwrap();
+
+                let options = dialog.GetOptions().unwrap_or_default();
+                let set_res = dialog.SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+                assert!(set_res.is_ok(), "SetOptions on IFileOpenDialog should succeed");
+
+                // Verify IFileSaveDialog creation and options setup in STA
+                let save_dialog: windows::core::Result<IFileSaveDialog> =
+                    CoCreateInstance(&FileSaveDialog, None, CLSCTX_ALL);
+                assert!(save_dialog.is_ok(), "IFileSaveDialog instantiation should succeed");
+                let sdialog = save_dialog.unwrap();
+
+                let s_options = sdialog.GetOptions().unwrap_or_default();
+                let s_set_res = sdialog.SetOptions(s_options | FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT);
+                assert!(s_set_res.is_ok(), "SetOptions on IFileSaveDialog should succeed");
+            }
+
+            CoUninitialize();
+        }
+    })
+    .join()
+    .unwrap();
+}

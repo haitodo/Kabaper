@@ -11,6 +11,7 @@ pub mod ui;
 
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::*;
+use windows::Win32::System::Com::*;
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
@@ -91,6 +92,24 @@ fn run_headless() -> ! {
 }
 
 fn run_gui_mode(start_path: Option<&Path>) {
+    // Initialize COM as Single-Threaded Apartment (STA) for UI thread, Shell dialogs, and WIC.
+    // If COM is not initialized as STA, IFileOpenDialog / IFileSaveDialog will deadlock when Show() is called from MTA.
+    struct ComGuard(bool);
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe {
+                    CoUninitialize();
+                }
+            }
+        }
+    }
+
+    let _com_guard = unsafe {
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        ComGuard(hr.is_ok())
+    };
+
     let storage = match Storage::init() {
         Ok(s) => s,
         Err(e) => {

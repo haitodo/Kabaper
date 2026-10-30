@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -976,6 +977,9 @@ impl AppState {
             let _ = save_dialog.SetFileName(PCWSTR(wide_name.as_ptr()));
             let _ = save_dialog.SetDefaultExtension(w!("png"));
 
+            let options = save_dialog.GetOptions().unwrap_or_default();
+            let _ = save_dialog.SetOptions(options | FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT);
+
             if save_dialog.Show(Some(self.hwnd)).is_ok()
                 && let Ok(item) = save_dialog.GetResult()
                 && let Ok(path_str) = item.GetDisplayName(SIGDN_FILESYSPATH)
@@ -1007,7 +1011,23 @@ impl AppState {
                 return;
             };
 
-            let _ = dialog.SetOptions(FOS_PICKFOLDERS);
+            let options = dialog.GetOptions().unwrap_or_default();
+            let _ = dialog.SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+
+            if let Some(folder) = &self.catalog.folder {
+                let wide_folder: Vec<u16> = folder
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(
+                    PCWSTR(wide_folder.as_ptr()),
+                    None,
+                ) {
+                    let _ = dialog.SetFolder(&item);
+                }
+            }
+
             if dialog.Show(Some(self.hwnd)).is_ok()
                 && let Ok(item) = dialog.GetResult()
                 && let Ok(path_str) = item.GetDisplayName(SIGDN_FILESYSPATH)
@@ -1116,6 +1136,7 @@ static mut APP_STATE_PTR: *mut AppState = std::ptr::null_mut();
 
 pub fn run_gui(mut state: AppState, class_name: &str) -> Result<()> {
     unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?;
 
