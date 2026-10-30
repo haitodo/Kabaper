@@ -7,7 +7,7 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::core::*;
 
 use crate::catalog::Catalog;
-use crate::ui::types::{BarButtonId, FrameOverlayButtonId};
+use crate::ui::types::{BarButtonId, FrameOverlayButtonId, ViewMode};
 
 pub fn get_window_dpi(hwnd: HWND) -> u32 {
     unsafe {
@@ -287,7 +287,7 @@ pub unsafe fn create_gui_font(hwnd: HWND, size_pt: i32, weight: i32) -> HFONT {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SidebarRowKind {
     FolderHeader {
         folder_path: PathBuf,
@@ -301,6 +301,7 @@ pub enum SidebarRowKind {
         is_selected: bool,
         is_pinned: bool,
         is_excluded: bool,
+        frame_targets: Vec<(usize, String, RECT)>,
     },
 }
 
@@ -317,6 +318,7 @@ pub struct SidebarLayout {
     pub focus_current_btn_rect: RECT,
     pub collapse_all_btn_rect: RECT,
     pub close_btn_rect: RECT,
+    pub target_frame_bar: Option<(RECT, Vec<(usize, String, RECT, bool)>)>,
     pub list_rect: RECT,
     pub rows: Vec<SidebarRowLayout>,
     pub total_content_height: i32,
@@ -334,6 +336,9 @@ pub fn compute_sidebar_layout(
     win_h: i32,
     bar_h: i32,
     show_filmstrip: bool,
+    view_mode: ViewMode,
+    layout_frames_count: usize,
+    selected_frame_idx: usize,
     dpi: u32,
 ) -> SidebarLayout {
     let sidebar_w = get_sidebar_width(dpi);
@@ -385,9 +390,55 @@ pub fn compute_sidebar_layout(
         bottom: btn_bottom,
     };
 
+    let target_frame_bar = if view_mode == ViewMode::Composite && layout_frames_count >= 2 {
+        let bar_top = header_rect.bottom;
+        let bar_h = scale_by_dpi(32, dpi);
+        let bar_rect = RECT {
+            left: 0,
+            top: bar_top,
+            right: sidebar_w,
+            bottom: bar_top + bar_h,
+        };
+
+        let mut buttons = Vec::new();
+        let btn_w = scale_by_dpi(54, dpi);
+        let btn_h = scale_by_dpi(22, dpi);
+        let btn_y = bar_top + (bar_h - btn_h) / 2;
+        let label_w = scale_by_dpi(48, dpi);
+        let start_x = scale_by_dpi(10, dpi) + label_w;
+        let btn_gap = scale_by_dpi(4, dpi);
+
+        for f_idx in 0..layout_frames_count {
+            let label = if layout_frames_count == 2 {
+                if f_idx == 0 { "左枠".to_string() } else { "右枠".to_string() }
+            } else if layout_frames_count == 3 {
+                if f_idx == 0 { "左枠".to_string() } else if f_idx == 1 { "中枠".to_string() } else { "右枠".to_string() }
+            } else {
+                format!("枠{}", f_idx + 1)
+            };
+            let b_left = start_x + (f_idx as i32) * (btn_w + btn_gap);
+            let b_rect = RECT {
+                left: b_left,
+                top: btn_y,
+                right: b_left + btn_w,
+                bottom: btn_y + btn_h,
+            };
+            buttons.push((f_idx, label, b_rect, f_idx == selected_frame_idx));
+        }
+        Some((bar_rect, buttons))
+    } else {
+        None
+    };
+
+    let list_top = if let Some((bar_r, _)) = &target_frame_bar {
+        bar_r.bottom
+    } else {
+        header_rect.bottom
+    };
+
     let list_rect = RECT {
         left: 0,
-        top: header_rect.bottom,
+        top: list_top,
         right: sidebar_w,
         bottom: bounds.bottom,
     };
@@ -459,6 +510,51 @@ pub fn compute_sidebar_layout(
                 if item_bottom >= list_rect.top && item_top <= list_rect.bottom {
                     let is_selected = selected_index == Some(idx);
                     let is_pinned = pinned_paths.contains(&item.path);
+
+                    let mut frame_targets = Vec::new();
+                    if view_mode == ViewMode::Composite && layout_frames_count >= 2 {
+                        let btn_w = scale_by_dpi(24, dpi);
+                        let btn_h = scale_by_dpi(20, dpi);
+                        let btn_gap = scale_by_dpi(3, dpi);
+                        let badge_reserve = if is_pinned || item.is_excluded {
+                            scale_by_dpi(26, dpi)
+                        } else {
+                            0
+                        };
+                        let total_btns_w = (layout_frames_count as i32) * btn_w
+                            + ((layout_frames_count as i32) - 1) * btn_gap;
+                        let start_btn_x =
+                            list_rect.right - scale_by_dpi(6, dpi) - badge_reserve - total_btns_w;
+                        let by = item_top + (item_h - btn_h) / 2;
+
+                        for f_idx in 0..layout_frames_count {
+                            let label = if layout_frames_count == 2 {
+                                if f_idx == 0 { "左".to_string() } else { "右".to_string() }
+                            } else if layout_frames_count == 3 {
+                                if f_idx == 0 {
+                                    "左".to_string()
+                                } else if f_idx == 1 {
+                                    "中".to_string()
+                                } else {
+                                    "右".to_string()
+                                }
+                            } else {
+                                format!("{}", f_idx + 1)
+                            };
+                            let bx = start_btn_x + (f_idx as i32) * (btn_w + btn_gap);
+                            frame_targets.push((
+                                f_idx,
+                                label,
+                                RECT {
+                                    left: bx,
+                                    top: by,
+                                    right: bx + btn_w,
+                                    bottom: by + btn_h,
+                                },
+                            ));
+                        }
+                    }
+
                     rows.push(SidebarRowLayout {
                         kind: SidebarRowKind::FileItem {
                             catalog_index: idx,
@@ -466,6 +562,7 @@ pub fn compute_sidebar_layout(
                             is_selected,
                             is_pinned,
                             is_excluded: item.is_excluded,
+                            frame_targets,
                         },
                         rect: RECT {
                             left: list_rect.left,
@@ -512,6 +609,7 @@ pub fn compute_sidebar_layout(
         focus_current_btn_rect,
         collapse_all_btn_rect,
         close_btn_rect,
+        target_frame_bar,
         list_rect,
         rows,
         total_content_height,

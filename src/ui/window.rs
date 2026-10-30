@@ -603,6 +603,9 @@ unsafe extern "system" fn wnd_proc(
                         cr.bottom,
                         bar_h,
                         state.show_filmstrip,
+                        state.view_mode,
+                        state.layout_frames.len(),
+                        state.selected_frame_idx,
                         dpi,
                     );
                     let scroll_amount = (delta as i32 / 120) * scale_by_dpi(60, dpi);
@@ -1438,6 +1441,9 @@ fn handle_sidebar_click(
         win_h,
         bar_h,
         state.show_filmstrip,
+        state.view_mode,
+        state.layout_frames.len(),
+        state.selected_frame_idx,
         dpi,
     );
 
@@ -1465,6 +1471,20 @@ fn handle_sidebar_click(
     {
         state.focus_current_folder();
         return true;
+    }
+
+    // 1.5 Check target frame bar (Composite mode)
+    if let Some((bar_r, buttons)) = &layout.target_frame_bar {
+        if y >= bar_r.top && y <= bar_r.bottom {
+            for (f_idx, _label, btn_rect, _is_active) in buttons {
+                if x >= btn_rect.left && x <= btn_rect.right && y >= btn_rect.top && y <= btn_rect.bottom {
+                    state.selected_frame_idx = *f_idx;
+                    state.ensure_current_item_visible_in_sidebar();
+                    return true;
+                }
+            }
+            return true;
+        }
     }
 
     // 2. Check scrollbar thumb / track
@@ -1496,7 +1516,21 @@ fn handle_sidebar_click(
                             }
                             return true;
                         }
-                        SidebarRowKind::FileItem { catalog_index, .. } => {
+                        SidebarRowKind::FileItem {
+                            catalog_index,
+                            frame_targets,
+                            ..
+                        } => {
+                            for (f_idx, _label, btn_rect) in frame_targets {
+                                if x >= btn_rect.left
+                                    && x <= btn_rect.right
+                                    && y >= btn_rect.top
+                                    && y <= btn_rect.bottom
+                                {
+                                    state.apply_image_to_frame(catalog_index, f_idx);
+                                    return true;
+                                }
+                            }
                             state.select_image_by_index(catalog_index);
                             return true;
                         }
@@ -1537,7 +1571,139 @@ fn show_context_menu(state: &mut AppState, hwnd: HWND, lparam: LPARAM) {
         let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
         let mut pt = POINT { x, y };
         let _ = ClientToScreen(hwnd, &mut pt);
+
+        if state.show_sidebar {
+            let dpi = get_window_dpi(hwnd);
+            let mut cr = RECT::default();
+            let _ = GetClientRect(hwnd, &mut cr);
+            let bar_h = if state.bar_visible { get_bar_height(dpi) } else { 0 };
+            let pinned_paths: HashSet<PathBuf> = state
+                .layout_frames
+                .iter()
+                .filter(|f| f.pinned)
+                .filter_map(|f| f.image.as_ref())
+                .map(|img| PathBuf::from(&img.id.0))
+                .collect();
+            let layout = compute_sidebar_layout(
+                &state.catalog,
+                state.current_selected_catalog_index(),
+                &pinned_paths,
+                &state.collapsed_folders,
+                state.sidebar_scroll_offset,
+                cr.right,
+                cr.bottom,
+                bar_h,
+                state.show_filmstrip,
+                state.view_mode,
+                state.layout_frames.len(),
+                state.selected_frame_idx,
+                dpi,
+            );
+
+            if x >= layout.bounds.left && x <= layout.bounds.right {
+                if y >= layout.list_rect.top && y <= layout.list_rect.bottom {
+                    for row in layout.rows {
+                        if y >= row.rect.top && y <= row.rect.bottom {
+                            if let SidebarRowKind::FileItem { catalog_index, .. } = row.kind {
+                                show_sidebar_context_menu(state, hwnd, pt.x, pt.y, catalog_index);
+                                return;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
         show_context_menu_at(state, hwnd, pt.x, pt.y);
+    }
+}
+
+fn show_sidebar_context_menu(
+    state: &mut AppState,
+    hwnd: HWND,
+    screen_x: i32,
+    screen_y: i32,
+    target_catalog_idx: usize,
+) {
+    unsafe {
+        let menu = CreatePopupMenu().unwrap();
+
+        if state.view_mode == ViewMode::Composite && state.layout_frames.len() >= 2 {
+            for f_idx in 0..state.layout_frames.len() {
+                let label = if state.layout_frames.len() == 2 {
+                    if f_idx == 0 { "左枠に反映" } else { "右枠に反映" }
+                } else if state.layout_frames.len() == 3 {
+                    if f_idx == 0 { "左枠に反映" } else if f_idx == 1 { "中枠に反映" } else { "右枠に反映" }
+                } else {
+                    "枠に反映"
+                };
+                let wide_label: Vec<u16> = format!("{}\0", label).encode_utf16().collect();
+                let _ = AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    3000 + f_idx,
+                    PCWSTR(wide_label.as_ptr()),
+                );
+            }
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
+        }
+
+        let _ = AppendMenuW(menu, MF_STRING, 3010, w!("この画像を選択"));
+        let _ = AppendMenuW(menu, MF_STRING, 3011, w!("ファイルの場所を開く (エクスプローラー)"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
+        let _ = AppendMenuW(menu, MF_STRING, 3012, w!("除外リストに追加"));
+
+        let _ = SetForegroundWindow(hwnd);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            screen_x,
+            screen_y,
+            None,
+            hwnd,
+            None,
+        );
+        let _ = DestroyMenu(menu);
+
+        let cmd_u = cmd.0 as u32;
+        if (3000..3000 + state.layout_frames.len() as u32).contains(&cmd_u) {
+            let f_idx = (cmd_u - 3000) as usize;
+            state.apply_image_to_frame(target_catalog_idx, f_idx);
+        } else {
+            match cmd_u {
+                3010 => {
+                    state.select_image_by_index(target_catalog_idx);
+                }
+                3011 => {
+                    if let Some(item) = state.catalog.items.get(target_catalog_idx) {
+                        let path_str = item.path.to_string_lossy().to_string();
+                        let _ = std::process::Command::new("explorer.exe")
+                            .arg("/select,")
+                            .arg(&path_str)
+                            .spawn();
+                    }
+                }
+                3012 => {
+                    if let Some(item) = state.catalog.items.get(target_catalog_idx) {
+                        let p = item.path.clone();
+                        let is_now_excluded = state.catalog.toggle_exclude(&p);
+                        state.sync_catalog_excludes();
+                        state.set_osd(
+                            if is_now_excluded {
+                                "画像を除外しました".into()
+                            } else {
+                                "画像の除外を解除しました".into()
+                            },
+                            2,
+                            false,
+                        );
+                        state.rebuild_layout(false, false);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 

@@ -1731,6 +1731,9 @@ fn draw_sidebar(state: &AppState, hdc: HDC, win_w: i32, win_h: i32, bar_h: i32, 
             win_h,
             bar_h,
             state.show_filmstrip,
+            state.view_mode,
+            state.layout_frames.len(),
+            state.selected_frame_idx,
             dpi,
         );
 
@@ -1824,9 +1827,61 @@ fn draw_sidebar(state: &AppState, hdc: HDC, win_w: i32, win_h: i32, bar_h: i32, 
             btn_radius,
         );
 
-        // Restore normal font for list
+        // Restore normal font for list & sub-bars
         let _ = SelectObject(hdc, old_font);
         let _ = DeleteObject(bold_font.into());
+
+        // Target frame selector bar (Composite mode)
+        if let Some((bar_r, buttons)) = &layout.target_frame_bar {
+            let bar_bg = CreateSolidBrush(M3_SURFACE_CARD);
+            let _ = FillRect(hdc, bar_r, bar_bg);
+            let _ = DeleteObject(bar_bg.into());
+
+            let sep_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
+            let sep_r = RECT {
+                left: bar_r.left,
+                top: bar_r.bottom - 1,
+                right: bar_r.right,
+                bottom: bar_r.bottom,
+            };
+            let _ = FillRect(hdc, &sep_r, sep_brush);
+            let _ = DeleteObject(sep_brush.into());
+
+            let mut label_r = RECT {
+                left: bar_r.left + scale_by_dpi(10, dpi),
+                top: bar_r.top,
+                right: bar_r.left + scale_by_dpi(58, dpi),
+                bottom: bar_r.bottom,
+            };
+            let _ = SetTextColor(hdc, M3_TEXT_SECONDARY);
+            draw_text(
+                hdc,
+                "反映先:",
+                &mut label_r,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+
+            let bar_btn_radius = scale_by_dpi(4, dpi);
+            for (_f_idx, label, b_rect, is_active) in buttons {
+                let style = if *is_active {
+                    ModernButtonStyle::SegmentActive
+                } else {
+                    ModernButtonStyle::SegmentInactive
+                };
+                let bw = b_rect.right - b_rect.left;
+                let bh = b_rect.bottom - b_rect.top;
+                draw_modern_button(
+                    hdc,
+                    b_rect.left,
+                    b_rect.top,
+                    bw,
+                    bh,
+                    label,
+                    style,
+                    bar_btn_radius,
+                );
+            }
+        }
 
         // Clip list area so scrolling rows don't bleed into header or filmstrip
         let _ = IntersectClipRect(
@@ -1884,6 +1939,7 @@ fn draw_sidebar(state: &AppState, hdc: HDC, win_w: i32, win_h: i32, bar_h: i32, 
                     is_selected,
                     is_pinned,
                     is_excluded,
+                    frame_targets,
                 } => {
                     if *is_selected {
                         let sel_brush = CreateSolidBrush(M3_SURFACE_HIGH);
@@ -1971,11 +2027,16 @@ fn draw_sidebar(state: &AppState, hdc: HDC, win_w: i32, win_h: i32, bar_h: i32, 
                         scale_by_dpi(8, dpi)
                     };
 
+                    let mut file_right = row.rect.right - badge_reserve;
+                    if let Some(first_btn) = frame_targets.first() {
+                        file_right = first_btn.2.left - scale_by_dpi(4, dpi);
+                    }
+
                     let text_x = thumb_x + thumb_size + scale_by_dpi(8, dpi);
                     let mut file_r = RECT {
                         left: text_x,
                         top: row.rect.top,
-                        right: row.rect.right - badge_reserve,
+                        right: file_right,
                         bottom: row.rect.bottom,
                     };
 
@@ -1993,6 +2054,22 @@ fn draw_sidebar(state: &AppState, hdc: HDC, win_w: i32, win_h: i32, bar_h: i32, 
                         &mut file_r,
                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                     );
+
+                    let frame_btn_radius = scale_by_dpi(3, dpi);
+                    for (_f_idx, label, btn_rect) in frame_targets {
+                        let bw = btn_rect.right - btn_rect.left;
+                        let bh = btn_rect.bottom - btn_rect.top;
+                        draw_modern_button(
+                            hdc,
+                            btn_rect.left,
+                            btn_rect.top,
+                            bw,
+                            bh,
+                            label,
+                            ModernButtonStyle::Ghost,
+                            frame_btn_radius,
+                        );
+                    }
 
                     if *is_pinned {
                         let mut badge_r = RECT {

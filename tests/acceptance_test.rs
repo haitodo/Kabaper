@@ -1262,3 +1262,105 @@ fn test_acceptance_sidebar_operations() {
 
     let _ = fs::remove_dir_all(&temp);
 }
+
+#[test]
+fn test_acceptance_sidebar_frame_assignment() {
+    let temp = std::env::temp_dir().join(format!("kabaper_sidebar_frame_{}", std::process::id()));
+    let _ = fs::create_dir_all(&temp);
+
+    let img1 = temp.join("img1.bmp");
+    let img2 = temp.join("img2.bmp");
+    let img3 = temp.join("img3.bmp");
+
+    let bmp_data = [
+        0x42, 0x4D, 0x3A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x36, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x18, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x13, 0x0B,
+        0x00, 0x00, 0x13, 0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00,
+    ];
+    fs::write(&img1, &bmp_data).unwrap();
+    fs::write(&img2, &bmp_data).unwrap();
+    fs::write(&img3, &bmp_data).unwrap();
+
+    let storage = kabaper::store::Storage::init_with_dir(temp.clone()).unwrap();
+    let initial_config = kabaper::store::AppConfig::default();
+    let mut state = kabaper::ui::AppState::new(storage, initial_config, None).unwrap();
+
+    state.open_path(&temp);
+    state.view_mode = kabaper::ui::ViewMode::Composite;
+    state.layout_frames = vec![
+        kabaper::layout::FrameInput {
+            image: None,
+            pinned: false,
+            pan: (0.5, 0.5),
+        },
+        kabaper::layout::FrameInput {
+            image: None,
+            pinned: false,
+            pan: (0.5, 0.5),
+        },
+    ];
+
+    // Apply img3 (index 2) directly to left frame (frame 0)
+    state.apply_image_to_frame(2, 0);
+    assert_eq!(state.selected_frame_idx, 0);
+    assert_eq!(
+        state.layout_frames[0].image.as_ref().unwrap().id.0,
+        img3.to_string_lossy().to_string()
+    );
+
+    // Apply img2 (index 1) directly to right frame (frame 1)
+    state.apply_image_to_frame(1, 1);
+    assert_eq!(state.selected_frame_idx, 1);
+    assert_eq!(
+        state.layout_frames[1].image.as_ref().unwrap().id.0,
+        img2.to_string_lossy().to_string()
+    );
+    // Left frame should remain img3!
+    assert_eq!(
+        state.layout_frames[0].image.as_ref().unwrap().id.0,
+        img3.to_string_lossy().to_string()
+    );
+
+    // Test sidebar layout has target_frame_bar with "左枠" and "右枠"
+    let pinned_paths = std::collections::HashSet::new();
+    let layout = kabaper::ui::compute_sidebar_layout(
+        &state.catalog,
+        state.current_selected_catalog_index(),
+        &pinned_paths,
+        &state.collapsed_folders,
+        state.sidebar_scroll_offset,
+        1200,
+        800,
+        45,
+        false,
+        state.view_mode,
+        state.layout_frames.len(),
+        state.selected_frame_idx,
+        96,
+    );
+
+    let (_, buttons) = layout
+        .target_frame_bar
+        .as_ref()
+        .expect("Target frame bar should exist in composite mode");
+    assert_eq!(buttons.len(), 2);
+    assert_eq!(buttons[0].1, "左枠");
+    assert_eq!(buttons[0].3, false); // frame 0 not active
+    assert_eq!(buttons[1].1, "右枠");
+    assert_eq!(buttons[1].3, true); // frame 1 is active
+
+    // Verify row items have [左] [右] action buttons
+    for row in &layout.rows {
+        if let kabaper::ui::SidebarRowKind::FileItem { frame_targets, .. } = &row.kind {
+            assert_eq!(frame_targets.len(), 2);
+            assert_eq!(frame_targets[0].1, "左");
+            assert_eq!(frame_targets[1].1, "右");
+            assert!(frame_targets[0].2.left < frame_targets[1].2.left);
+        }
+    }
+
+    let _ = fs::remove_dir_all(&temp);
+}

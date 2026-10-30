@@ -1685,6 +1685,32 @@ impl AppState {
         self.ensure_current_item_visible_in_sidebar();
     }
 
+    pub fn apply_image_to_frame(&mut self, target_idx: usize, frame_idx: usize) {
+        if target_idx >= self.catalog.items.len() || frame_idx >= self.layout_frames.len() {
+            return;
+        }
+        self.selected_frame_idx = frame_idx;
+        let next_path = self.catalog.items[target_idx].path.clone();
+        if let Ok(spec) = self.decoder.read_image_spec(&next_path) {
+            self.layout_frames[frame_idx].image = Some(spec);
+            self.layout_frames[frame_idx].pan = (0.5, 0.5);
+            if frame_idx == 0 {
+                self.catalog.select_by_path(&next_path);
+            }
+            self.rebuild_layout(false, false);
+            let frame_label = if self.layout_frames.len() == 2 {
+                if frame_idx == 0 { "左枠" } else { "右枠" }
+            } else if self.layout_frames.len() == 3 {
+                if frame_idx == 0 { "左枠" } else if frame_idx == 1 { "中枠" } else { "右枠" }
+            } else {
+                "指定枠"
+            };
+            let fname = next_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            self.set_osd(format!("{}: {}", frame_label, fname), 2, false);
+        }
+        self.ensure_current_item_visible_in_sidebar();
+    }
+
     pub fn ensure_current_item_visible_in_sidebar(&mut self) {
         let Some(cur_idx) = self.current_selected_catalog_index() else {
             return;
