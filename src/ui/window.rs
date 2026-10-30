@@ -721,7 +721,13 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     VK_DELETE => state.toggle_exclude_current(),
-                    VK_O if ctrl => state.open_folder_dialog(),
+                    VK_O if ctrl => {
+                        if shift {
+                            state.open_in_explorer();
+                        } else {
+                            state.open_folder_dialog();
+                        }
+                    }
                     VK_F5 => {
                         state.catalog.reload();
                         state.rebuild_layout(true, true);
@@ -1361,6 +1367,12 @@ fn show_context_menu(state: &mut AppState, hwnd: HWND, lparam: LPARAM) {
 fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_y: i32) {
     unsafe {
         let menu = CreatePopupMenu().unwrap();
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            1011,
+            w!("ファイルの場所を開く (エクスプローラー)"),
+        );
         let _ = AppendMenuW(menu, MF_STRING, 1001, w!("フォルダを開く (Ctrl+O)"));
 
         if !state.config.library.recent_folders.is_empty() {
@@ -1402,6 +1414,7 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
         let _ = DestroyMenu(menu);
 
         match cmd.0 as u32 {
+            1011 => state.open_in_explorer(),
             1001 => state.open_folder_dialog(),
             1002 => {
                 state.catalog.reload();

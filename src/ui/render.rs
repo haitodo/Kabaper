@@ -1536,6 +1536,7 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
             ("S / Ctrl+S", "PNG保存"),
             ("Del", "除外切替"),
             ("Ctrl+O", "フォルダ選択"),
+            ("Ctrl+Shift+O", "ファイルの場所を開く"),
             ("F5", "再読込"),
             ("I", "情報表示切替"),
             ("F11 / Alt+Enter", "全画面切替"),

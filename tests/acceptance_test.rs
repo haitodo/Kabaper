@@ -1072,3 +1072,66 @@ fn test_acceptance_dpi_scaling_empty_and_osd() {
     assert_eq!(osd_btn_150.right - osd_btn_150.left, 143);
     assert_eq!(osd_btn_150.bottom - osd_btn_150.top, 42);
 }
+
+#[test]
+fn test_acceptance_current_selected_image_path() {
+    let temp = std::env::temp_dir().join(format!("kabaper_test_sel_{}", std::process::id()));
+    let _ = fs::create_dir_all(&temp);
+    let storage = kabaper::store::Storage::init_with_dir(temp.clone()).unwrap();
+
+    let mut state = kabaper::ui::AppState::new(storage, kabaper::store::AppConfig::default(), None).unwrap();
+
+    // Empty state
+    assert_eq!(state.current_selected_image_path(), None);
+
+    // Normal view with items
+    state.catalog.items = vec![
+        kabaper::catalog::CatalogItem {
+            path: PathBuf::from("img0.jpg"),
+            filename: "img0.jpg".into(),
+            is_excluded: false,
+            failure_reason: None,
+        },
+        kabaper::catalog::CatalogItem {
+            path: PathBuf::from("img1.jpg"),
+            filename: "img1.jpg".into(),
+            is_excluded: false,
+            failure_reason: None,
+        },
+    ];
+    state.catalog.current_index = Some(0);
+    state.view_mode = kabaper::ui::ViewMode::Normal;
+    assert_eq!(state.current_selected_image_path(), Some(PathBuf::from("img0.jpg")));
+
+    state.catalog.current_index = Some(1);
+    assert_eq!(state.current_selected_image_path(), Some(PathBuf::from("img1.jpg")));
+
+    // Composite view with layout frames
+    state.view_mode = kabaper::ui::ViewMode::Composite;
+    state.layout_frames = vec![
+        kabaper::layout::FrameInput {
+            image: Some(kabaper::layout::ImageSpec {
+                id: kabaper::layout::ImageId("frame0.jpg".into()),
+                size_px: (1920, 1080),
+            }),
+            pinned: false,
+            pan: (0.5, 0.5),
+        },
+        kabaper::layout::FrameInput {
+            image: Some(kabaper::layout::ImageSpec {
+                id: kabaper::layout::ImageId("frame1.jpg".into()),
+                size_px: (1920, 1080),
+            }),
+            pinned: false,
+            pan: (0.5, 0.5),
+        },
+    ];
+
+    state.selected_frame_idx = 0;
+    assert_eq!(state.current_selected_image_path(), Some(PathBuf::from("frame0.jpg")));
+
+    state.selected_frame_idx = 1;
+    assert_eq!(state.current_selected_image_path(), Some(PathBuf::from("frame1.jpg")));
+
+    let _ = fs::remove_dir_all(&temp);
+}

@@ -1103,15 +1103,55 @@ impl AppState {
         }
     }
 
-    pub fn toggle_exclude_current(&mut self) {
-        let path = if self.view_mode == ViewMode::Composite {
+    pub fn current_selected_image_path(&self) -> Option<PathBuf> {
+        if self.view_mode == ViewMode::Composite {
             self.layout_frames
                 .get(self.selected_frame_idx)
                 .and_then(|f| f.image.as_ref())
                 .map(|img| PathBuf::from(&img.id.0))
         } else {
             self.catalog.current_item().map(|it| it.path.clone())
-        };
+        }
+    }
+
+    pub fn open_in_explorer(&mut self) {
+        if let Some(path) = self.current_selected_image_path() {
+            let norm_path = normalize_path(&path);
+            if norm_path.exists() {
+                use std::os::windows::process::CommandExt;
+                let arg = format!("/select,\"{}\"", norm_path.to_string_lossy());
+                if let Err(e) = std::process::Command::new("explorer").raw_arg(arg).spawn() {
+                    self.set_osd(format!("エクスプローラーの起動に失敗しました: {e}"), 3, true);
+                } else {
+                    let fname = norm_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.set_osd(format!("ファイルの場所を開きました: {fname}"), 2, false);
+                }
+                return;
+            }
+        }
+
+        if let Some(folder) = &self.catalog.folder {
+            let norm_folder = normalize_path(folder);
+            if norm_folder.exists() {
+                use std::os::windows::process::CommandExt;
+                let arg = format!("\"{}\"", norm_folder.to_string_lossy());
+                if let Err(e) = std::process::Command::new("explorer").raw_arg(arg).spawn() {
+                    self.set_osd(format!("エクスプローラーの起動に失敗しました: {e}"), 3, true);
+                } else {
+                    self.set_osd(format!("フォルダを開きました: {}", norm_folder.display()), 2, false);
+                }
+                return;
+            }
+        }
+
+        self.set_osd("開く画像またはフォルダがありません".into(), 2, true);
+    }
+
+    pub fn toggle_exclude_current(&mut self) {
+        let path = self.current_selected_image_path();
 
         if let Some(p) = path {
             let is_now_excluded = self.catalog.toggle_exclude(&p);
@@ -1434,7 +1474,12 @@ impl AppState {
             let options = dialog.GetOptions().unwrap_or_default();
             let _ = dialog.SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
 
-            if let Some(folder) = &self.catalog.folder {
+            let target_folder = self
+                .current_selected_image_path()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .or_else(|| self.catalog.folder.clone());
+
+            if let Some(folder) = &target_folder {
                 let wide_folder: Vec<u16> = folder
                     .as_os_str()
                     .encode_wide()
