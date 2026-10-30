@@ -1,17 +1,5 @@
 #![windows_subsystem = "windows"]
 
-pub mod apply;
-pub mod catalog;
-pub mod compose;
-pub mod decode;
-pub mod layout;
-pub mod monitor;
-pub mod random;
-pub mod schedule;
-pub mod smart_pan;
-pub mod store;
-pub mod ui;
-
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::*;
@@ -19,9 +7,9 @@ use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
 
-use crate::random::execute_random_update;
-use crate::store::{AppConfig, Storage, get_instance_id_for_dir};
-use crate::ui::{AppState, run_gui};
+use kabaper::random::execute_random_update;
+use kabaper::store::{AppConfig, Storage, get_instance_id_for_dir};
+use kabaper::ui::{AppState, run_gui};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

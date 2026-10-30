@@ -128,23 +128,73 @@ fn render_foreground(
 
     let dw_f = fg_dest.width as f64;
     let dh_f = fg_dest.height as f64;
+    let img_w = img.width as i32;
+    let img_h = img.height as i32;
+    let stride_img = (img.width as usize) * 4;
+
+    // Precalculate horizontal interpolation parameters (weights & pixel offsets)
+    // This turns O(W * H * 16) floating-point calculations into O(W + H)
+    struct XSample {
+        sx_offsets: [usize; 4],
+        weights: [f32; 4],
+    }
+
+    let mut x_table = Vec::with_capacity((max_x - min_x) as usize);
+    for x in min_x..max_x {
+        let u = ((x as i32 - fg_dest.x) as f64 + 0.5) / dw_f;
+        let sx = src_x_start + u * src_w;
+        let px = (sx - 0.5).clamp(0.0, (img.width - 1) as f64);
+        let x0 = px.floor() as i32;
+        let fx = (px - x0 as f64) as f32;
+        let wx = catmull_rom_weights(fx);
+
+        let sx0 = (x0 - 1).clamp(0, img_w - 1) as usize * 4;
+        let sx1 = x0.clamp(0, img_w - 1) as usize * 4;
+        let sx2 = (x0 + 1).clamp(0, img_w - 1) as usize * 4;
+        let sx3 = (x0 + 2).clamp(0, img_w - 1) as usize * 4;
+        x_table.push(XSample {
+            sx_offsets: [sx0, sx1, sx2, sx3],
+            weights: wx,
+        });
+    }
 
     for y in min_y..max_y {
         let v = ((y as i32 - fg_dest.y) as f64 + 0.5) / dh_f;
         let sy = src_y_start + v * src_h;
+        let py = (sy - 0.5).clamp(0.0, (img.height - 1) as f64);
+        let y0 = py.floor() as i32;
+        let fy = (py - y0 as f64) as f32;
+        let wy = catmull_rom_weights(fy);
+
+        let row0 = (y0 - 1).clamp(0, img_h - 1) as usize * stride_img;
+        let row1 = y0.clamp(0, img_h - 1) as usize * stride_img;
+        let row2 = (y0 + 1).clamp(0, img_h - 1) as usize * stride_img;
+        let row3 = (y0 + 2).clamp(0, img_h - 1) as usize * stride_img;
+        let rows = [row0, row1, row2, row3];
 
         let row_offset = (y as usize) * (target.width as usize) * 4;
+        let target_row = &mut target.pixels
+            [row_offset + (min_x as usize) * 4..row_offset + (max_x as usize) * 4];
 
-        for x in min_x..max_x {
-            let u = ((x as i32 - fg_dest.x) as f64 + 0.5) / dw_f;
-            let sx = src_x_start + u * src_w;
+        for (sample, out_pixel) in x_table.iter().zip(target_row.chunks_exact_mut(4)) {
+            let mut b_acc = 0.0f32;
+            let mut g_acc = 0.0f32;
+            let mut r_acc = 0.0f32;
 
-            let (b, g, r) = sample_bicubic(img, sx, sy);
-            let p_off = row_offset + (x as usize) * 4;
-            target.pixels[p_off] = b;
-            target.pixels[p_off + 1] = g;
-            target.pixels[p_off + 2] = r;
-            target.pixels[p_off + 3] = 255;
+            for (&row, &wy_j) in rows.iter().zip(wy.iter()) {
+                for (&sx_off, &wx_i) in sample.sx_offsets.iter().zip(sample.weights.iter()) {
+                    let offset = row + sx_off;
+                    let weight = wy_j * wx_i;
+                    b_acc += img.pixels[offset] as f32 * weight;
+                    g_acc += img.pixels[offset + 1] as f32 * weight;
+                    r_acc += img.pixels[offset + 2] as f32 * weight;
+                }
+            }
+
+            out_pixel[0] = b_acc.round().clamp(0.0, 255.0) as u8;
+            out_pixel[1] = g_acc.round().clamp(0.0, 255.0) as u8;
+            out_pixel[2] = r_acc.round().clamp(0.0, 255.0) as u8;
+            out_pixel[3] = 255;
         }
     }
 }
@@ -248,30 +298,68 @@ fn gaussian_blur_rgb(src: &[u8], width: u32, height: u32, sigma: f64) -> Vec<u8>
     for val in &mut kernel {
         *val /= sum;
     }
+    let kernel_f32: Vec<f32> = kernel.iter().map(|&v| v as f32).collect();
 
     let w = width as i32;
     let h = height as i32;
 
-    // Horizontal pass
+    // Horizontal pass: partition into left clamped, middle unclamped, right clamped
     let mut tmp = vec![0f32; (width as usize) * (height as usize) * 3];
+    let left_end = radius.min(w);
+    let right_start = (w - radius).max(left_end);
+
     for y in 0..h {
         let row_in = (y as usize) * (width as usize) * 3;
         let row_out = (y as usize) * (width as usize) * 3;
-        for x in 0..w {
+
+        for x in 0..left_end {
             let mut acc_b = 0.0f32;
             let mut acc_g = 0.0f32;
             let mut acc_r = 0.0f32;
-
             for (k_idx, k) in (-radius..=radius).enumerate() {
-                // Edge clamping (sample端クランプ)
                 let sx = (x + k).clamp(0, w - 1) as usize;
                 let src_idx = row_in + sx * 3;
-                let weight = kernel[k_idx] as f32;
+                let weight = kernel_f32[k_idx];
                 acc_b += src[src_idx] as f32 * weight;
                 acc_g += src[src_idx + 1] as f32 * weight;
                 acc_r += src[src_idx + 2] as f32 * weight;
             }
+            let out_idx = row_out + (x as usize) * 3;
+            tmp[out_idx] = acc_b;
+            tmp[out_idx + 1] = acc_g;
+            tmp[out_idx + 2] = acc_r;
+        }
 
+        for x in left_end..right_start {
+            let mut acc_b = 0.0f32;
+            let mut acc_g = 0.0f32;
+            let mut acc_r = 0.0f32;
+            for (k_idx, k) in (-radius..=radius).enumerate() {
+                let sx = (x + k) as usize;
+                let src_idx = row_in + sx * 3;
+                let weight = kernel_f32[k_idx];
+                acc_b += src[src_idx] as f32 * weight;
+                acc_g += src[src_idx + 1] as f32 * weight;
+                acc_r += src[src_idx + 2] as f32 * weight;
+            }
+            let out_idx = row_out + (x as usize) * 3;
+            tmp[out_idx] = acc_b;
+            tmp[out_idx + 1] = acc_g;
+            tmp[out_idx + 2] = acc_r;
+        }
+
+        for x in right_start..w {
+            let mut acc_b = 0.0f32;
+            let mut acc_g = 0.0f32;
+            let mut acc_r = 0.0f32;
+            for (k_idx, k) in (-radius..=radius).enumerate() {
+                let sx = (x + k).clamp(0, w - 1) as usize;
+                let src_idx = row_in + sx * 3;
+                let weight = kernel_f32[k_idx];
+                acc_b += src[src_idx] as f32 * weight;
+                acc_g += src[src_idx + 1] as f32 * weight;
+                acc_r += src[src_idx + 2] as f32 * weight;
+            }
             let out_idx = row_out + (x as usize) * 3;
             tmp[out_idx] = acc_b;
             tmp[out_idx + 1] = acc_g;
@@ -279,25 +367,69 @@ fn gaussian_blur_rgb(src: &[u8], width: u32, height: u32, sigma: f64) -> Vec<u8>
         }
     }
 
-    // Vertical pass
+    // Vertical pass: partition into top clamped, middle unclamped, bottom clamped
     let mut out = vec![0u8; (width as usize) * (height as usize) * 3];
-    for y in 0..h {
-        let row_out = (y as usize) * (width as usize) * 3;
+    let top_end = radius.min(h);
+    let bottom_start = (h - radius).max(top_end);
+
+    let row_stride = (width as usize) * 3;
+
+    for y in 0..top_end {
+        let row_out = (y as usize) * row_stride;
         for x in 0..w {
             let mut acc_b = 0.0f32;
             let mut acc_g = 0.0f32;
             let mut acc_r = 0.0f32;
-
             for (k_idx, k) in (-radius..=radius).enumerate() {
-                // Edge clamping
                 let sy = (y + k).clamp(0, h - 1) as usize;
-                let src_idx = sy * (width as usize) * 3 + (x as usize) * 3;
-                let weight = kernel[k_idx] as f32;
+                let src_idx = sy * row_stride + (x as usize) * 3;
+                let weight = kernel_f32[k_idx];
                 acc_b += tmp[src_idx] * weight;
                 acc_g += tmp[src_idx + 1] * weight;
                 acc_r += tmp[src_idx + 2] * weight;
             }
+            let out_idx = row_out + (x as usize) * 3;
+            out[out_idx] = acc_b.round().clamp(0.0, 255.0) as u8;
+            out[out_idx + 1] = acc_g.round().clamp(0.0, 255.0) as u8;
+            out[out_idx + 2] = acc_r.round().clamp(0.0, 255.0) as u8;
+        }
+    }
 
+    for y in top_end..bottom_start {
+        let row_out = (y as usize) * row_stride;
+        for x in 0..w {
+            let mut acc_b = 0.0f32;
+            let mut acc_g = 0.0f32;
+            let mut acc_r = 0.0f32;
+            for (k_idx, k) in (-radius..=radius).enumerate() {
+                let sy = (y + k) as usize;
+                let src_idx = sy * row_stride + (x as usize) * 3;
+                let weight = kernel_f32[k_idx];
+                acc_b += tmp[src_idx] * weight;
+                acc_g += tmp[src_idx + 1] * weight;
+                acc_r += tmp[src_idx + 2] * weight;
+            }
+            let out_idx = row_out + (x as usize) * 3;
+            out[out_idx] = acc_b.round().clamp(0.0, 255.0) as u8;
+            out[out_idx + 1] = acc_g.round().clamp(0.0, 255.0) as u8;
+            out[out_idx + 2] = acc_r.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    for y in bottom_start..h {
+        let row_out = (y as usize) * row_stride;
+        for x in 0..w {
+            let mut acc_b = 0.0f32;
+            let mut acc_g = 0.0f32;
+            let mut acc_r = 0.0f32;
+            for (k_idx, k) in (-radius..=radius).enumerate() {
+                let sy = (y + k).clamp(0, h - 1) as usize;
+                let src_idx = sy * row_stride + (x as usize) * 3;
+                let weight = kernel_f32[k_idx];
+                acc_b += tmp[src_idx] * weight;
+                acc_g += tmp[src_idx + 1] * weight;
+                acc_r += tmp[src_idx + 2] * weight;
+            }
             let out_idx = row_out + (x as usize) * 3;
             out[out_idx] = acc_b.round().clamp(0.0, 255.0) as u8;
             out[out_idx + 1] = acc_g.round().clamp(0.0, 255.0) as u8;
@@ -395,48 +527,6 @@ fn sample_bilinear(img: &DecodedImage, x: f64, y: f64) -> (u8, u8, u8) {
     )
 }
 
-#[inline]
-fn sample_bicubic(img: &DecodedImage, x: f64, y: f64) -> (u8, u8, u8) {
-    // Bicubic Catmull-Rom spline sampling
-    let px = (x - 0.5).clamp(0.0, (img.width - 1) as f64);
-    let py = (y - 0.5).clamp(0.0, (img.height - 1) as f64);
-
-    let x0 = px.floor() as i32;
-    let y0 = py.floor() as i32;
-    let fx = (px - x0 as f64) as f32;
-    let fy = (py - y0 as f64) as f32;
-
-    let wx = catmull_rom_weights(fx);
-    let wy = catmull_rom_weights(fy);
-
-    let w = img.width as i32;
-    let h = img.height as i32;
-
-    let mut b_acc = 0.0f32;
-    let mut g_acc = 0.0f32;
-    let mut r_acc = 0.0f32;
-
-    for (j, &wy_j) in wy.iter().enumerate() {
-        let sy = (y0 - 1 + j as i32).clamp(0, h - 1) as usize;
-        let row_offset = sy * (w as usize) * 4;
-
-        for (i, &wx_i) in wx.iter().enumerate() {
-            let sx = (x0 - 1 + i as i32).clamp(0, w - 1) as usize;
-            let weight = wy_j * wx_i;
-            let offset = row_offset + sx * 4;
-
-            b_acc += img.pixels[offset] as f32 * weight;
-            g_acc += img.pixels[offset + 1] as f32 * weight;
-            r_acc += img.pixels[offset + 2] as f32 * weight;
-        }
-    }
-
-    (
-        b_acc.round().clamp(0.0, 255.0) as u8,
-        g_acc.round().clamp(0.0, 255.0) as u8,
-        r_acc.round().clamp(0.0, 255.0) as u8,
-    )
-}
 
 #[inline]
 fn catmull_rom_weights(t: f32) -> [f32; 4] {

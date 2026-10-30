@@ -1,4 +1,3 @@
-use rand::seq::IndexedRandom;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -256,24 +255,28 @@ impl Catalog {
         current_path: Option<&Path>,
         excluded_ids: &HashSet<PathBuf>,
     ) -> Option<(usize, PathBuf)> {
+        use rand::seq::IteratorRandom;
+
         if self.items.is_empty() {
             return None;
         }
 
-        let cur_norm = current_path.map(normalize_path);
+        let cur_clean = current_path.map(strip_unc_prefix);
         let is_current = |p: &Path| {
-            if let Some(cp) = current_path {
-                p == cp || cur_norm.as_deref() == Some(p) || (cur_norm.is_some() && normalize_path(p) == *cur_norm.as_ref().unwrap())
+            if let Some(ref cp) = cur_clean {
+                p == cp
             } else {
                 false
             }
         };
         let is_in_excluded_ids = |p: &Path| {
-            excluded_ids.contains(p) || excluded_ids.contains(&normalize_path(p))
+            excluded_ids.contains(p)
         };
 
+        let mut rng = rand::rng();
+
         // 1. First priority: valid images (!excluded, no failure, not in excluded_ids, and not current)
-        let valid_other_candidates: Vec<(usize, &CatalogItem)> = self
+        let prio1 = self
             .items
             .iter()
             .enumerate()
@@ -283,16 +286,13 @@ impl Catalog {
                     && !is_in_excluded_ids(&it.path)
                     && !is_current(&it.path)
             })
-            .collect();
-
-        let mut rng = rand::rng();
-        if let Some((idx, it)) = valid_other_candidates.choose(&mut rng) {
-            return Some((*idx, it.path.clone()));
+            .choose(&mut rng);
+        if let Some((idx, it)) = prio1 {
+            return Some((idx, it.path.clone()));
         }
 
         // 2. Second priority: valid images including current_path (if current is valid and not in excluded_ids)
-        // This handles cases where only 1 valid candidate exists in total.
-        let valid_candidates: Vec<(usize, &CatalogItem)> = self
+        let prio2 = self
             .items
             .iter()
             .enumerate()
@@ -301,14 +301,13 @@ impl Catalog {
                     && it.failure_reason.is_none()
                     && !is_in_excluded_ids(&it.path)
             })
-            .collect();
-
-        if let Some((idx, it)) = valid_candidates.choose(&mut rng) {
-            return Some((*idx, it.path.clone()));
+            .choose(&mut rng);
+        if let Some((idx, it)) = prio2 {
+            return Some((idx, it.path.clone()));
         }
 
         // 3. Third priority (fallback): any images with no failure that are not in excluded_ids and not current
-        let non_failing_other: Vec<(usize, &CatalogItem)> = self
+        let prio3 = self
             .items
             .iter()
             .enumerate()
@@ -317,23 +316,18 @@ impl Catalog {
                     && !is_in_excluded_ids(&it.path)
                     && !is_current(&it.path)
             })
-            .collect();
-
-        if let Some((idx, it)) = non_failing_other.choose(&mut rng) {
-            return Some((*idx, it.path.clone()));
+            .choose(&mut rng);
+        if let Some((idx, it)) = prio3 {
+            return Some((idx, it.path.clone()));
         }
 
         // 4. Fallback to any non-failing not in excluded_ids
-        let non_failing: Vec<(usize, &CatalogItem)> = self
-            .items
+        self.items
             .iter()
             .enumerate()
             .filter(|(_, it)| it.failure_reason.is_none() && !is_in_excluded_ids(&it.path))
-            .collect();
-
-        non_failing
             .choose(&mut rng)
-            .map(|(idx, it)| (*idx, it.path.clone()))
+            .map(|(idx, it)| (idx, it.path.clone()))
     }
 
     pub fn select_random(&mut self) -> Option<&CatalogItem> {
@@ -348,12 +342,20 @@ impl Catalog {
     }
 }
 
+pub fn strip_unc_prefix(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 pub fn collect_images_recursive(root: &Path) -> Vec<PathBuf> {
     let mut images = Vec::new();
-    let mut dirs_to_visit = vec![root.to_path_buf()];
-    let mut visited_dirs = HashSet::new();
-
     let norm_root = normalize_path(root);
+    let mut dirs_to_visit = vec![norm_root.clone()];
+    let mut visited_dirs = HashSet::new();
     visited_dirs.insert(norm_root);
 
     while let Some(current_dir) = dirs_to_visit.pop() {
@@ -374,12 +376,12 @@ pub fn collect_images_recursive(root: &Path) -> Vec<PathBuf> {
                 {
                     continue;
                 }
-                let norm = normalize_path(&path);
-                if visited_dirs.insert(norm) {
+                let clean_dir = strip_unc_prefix(&path);
+                if visited_dirs.insert(clean_dir) {
                     dirs_to_visit.push(path);
                 }
             } else if file_type.is_file() && is_supported_image(&path) {
-                images.push(normalize_path(&path));
+                images.push(strip_unc_prefix(&path));
             }
         }
     }
@@ -401,45 +403,43 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     // Canonicalize or absolute path normalization
     if let Ok(canon) = fs::canonicalize(path) {
         // Strip Windows UNC prefix \\?\ if present for clean paths
-        let s = canon.to_string_lossy();
-        if let Some(stripped) = s.strip_prefix(r"\\?\") {
-            PathBuf::from(stripped)
-        } else {
-            canon
-        }
+        strip_unc_prefix(&canon)
+    } else if path.is_absolute() {
+        strip_unc_prefix(path)
+    } else if let Ok(cur) = std::env::current_dir() {
+        strip_unc_prefix(&cur.join(path))
     } else {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else if let Ok(cur) = std::env::current_dir() {
-            cur.join(path)
-        } else {
-            path.to_path_buf()
-        }
+        strip_unc_prefix(path)
     }
 }
 
 pub fn natural_cmp(a: &Path, b: &Path) -> Ordering {
-    let parent_a: Vec<_> = a
-        .parent()
-        .map(|p| p.components().collect())
-        .unwrap_or_default();
-    let parent_b: Vec<_> = b
-        .parent()
-        .map(|p| p.components().collect())
-        .unwrap_or_default();
+    let p_a = a.parent();
+    let p_b = b.parent();
 
-    for (ca, cb) in parent_a.iter().zip(parent_b.iter()) {
-        let sa = ca.as_os_str().to_string_lossy();
-        let sb = cb.as_os_str().to_string_lossy();
-        let ord = natural_str_cmp(&sa, &sb);
-        if ord != Ordering::Equal {
-            return ord;
+    match (p_a, p_b) {
+        (Some(pa), Some(pb)) => {
+            let mut it_a = pa.components();
+            let mut it_b = pb.components();
+            loop {
+                match (it_a.next(), it_b.next()) {
+                    (Some(ca), Some(cb)) => {
+                        let sa = ca.as_os_str().to_string_lossy();
+                        let sb = cb.as_os_str().to_string_lossy();
+                        let ord = natural_str_cmp(&sa, &sb);
+                        if ord != Ordering::Equal {
+                            return ord;
+                        }
+                    }
+                    (Some(_), None) => return Ordering::Greater,
+                    (None, Some(_)) => return Ordering::Less,
+                    (None, None) => break,
+                }
+            }
         }
-    }
-
-    let depth_ord = parent_a.len().cmp(&parent_b.len());
-    if depth_ord != Ordering::Equal {
-        return depth_ord;
+        (Some(_), None) => return Ordering::Greater,
+        (None, Some(_)) => return Ordering::Less,
+        (None, None) => {}
     }
 
     let name_a = a.file_name().and_then(|f| f.to_str()).unwrap_or("");
@@ -451,92 +451,89 @@ pub fn natural_cmp(a: &Path, b: &Path) -> Ordering {
     }
 
     // Tie-break: codepoint order of normalized full path
-    a.to_string_lossy().cmp(&b.to_string_lossy())
-}
-
-enum Chunk<'a> {
-    Digits(&'a str),
-    NonDigits(&'a str),
-}
-
-fn chunk_str(s: &str) -> Vec<Chunk<'_>> {
-    let mut chunks = Vec::new();
-    let mut chars = s.char_indices().peekable();
-
-    while let Some(&(start, c)) = chars.peek() {
-        let is_digit = c.is_ascii_digit();
-        let mut end = start + c.len_utf8();
-        chars.next();
-
-        while let Some(&(next_start, next_c)) = chars.peek() {
-            if next_c.is_ascii_digit() == is_digit {
-                end = next_start + next_c.len_utf8();
-                chars.next();
-            } else {
-                break;
-            }
-        }
-
-        let slice = &s[start..end];
-        if is_digit {
-            chunks.push(Chunk::Digits(slice));
-        } else {
-            chunks.push(Chunk::NonDigits(slice));
-        }
-    }
-
-    chunks
+    a.as_os_str().cmp(b.as_os_str())
 }
 
 pub fn natural_str_cmp(a: &str, b: &str) -> Ordering {
-    let chunks_a = chunk_str(a);
-    let chunks_b = chunk_str(b);
+    let mut rem_a = a;
+    let mut rem_b = b;
 
-    let mut i = 0;
-    while i < chunks_a.len() && i < chunks_b.len() {
-        match (&chunks_a[i], &chunks_b[i]) {
-            (Chunk::Digits(da), Chunk::Digits(db)) => {
-                // Parse numeric value or compare by value
-                let num_a = da.parse::<u128>().ok();
-                let num_b = db.parse::<u128>().ok();
-                match (num_a, num_b) {
-                    (Some(na), Some(nb)) => {
-                        let ord = na.cmp(&nb);
-                        if ord != Ordering::Equal {
-                            return ord;
-                        }
-                        // If values are equal (e.g. 01 vs 1), shorter length first
-                        let len_ord = da.len().cmp(&db.len());
-                        if len_ord != Ordering::Equal {
-                            return len_ord;
-                        }
-                    }
-                    _ => {
-                        // Fallback string compare
-                        let ord = da.cmp(db);
-                        if ord != Ordering::Equal {
-                            return ord;
-                        }
-                    }
+    while !rem_a.is_empty() && !rem_b.is_empty() {
+        let first_a = rem_a.chars().next().unwrap();
+        let first_b = rem_b.chars().next().unwrap();
+        let a_is_digit = first_a.is_ascii_digit();
+        let b_is_digit = first_b.is_ascii_digit();
+
+        match (a_is_digit, b_is_digit) {
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            (true, true) => {
+                // Extract contiguous ascii digits
+                let len_a = rem_a.bytes().take_while(|b| b.is_ascii_digit()).count();
+                let len_b = rem_b.bytes().take_while(|b| b.is_ascii_digit()).count();
+                let slice_a = &rem_a[..len_a];
+                let slice_b = &rem_b[..len_b];
+                rem_a = &rem_a[len_a..];
+                rem_b = &rem_b[len_b..];
+
+                // Numeric comparison:
+                let nz_a = slice_a.trim_start_matches('0');
+                let nz_b = slice_b.trim_start_matches('0');
+
+                let len_cmp = nz_a.len().cmp(&nz_b.len());
+                if len_cmp != Ordering::Equal {
+                    return len_cmp;
+                }
+
+                let val_cmp = nz_a.cmp(nz_b);
+                if val_cmp != Ordering::Equal {
+                    return val_cmp;
+                }
+
+                // If numeric values are equal, shorter original length comes first (e.g. 3 < 03)
+                let raw_len_cmp = slice_a.len().cmp(&slice_b.len());
+                if raw_len_cmp != Ordering::Equal {
+                    return raw_len_cmp;
                 }
             }
-            (Chunk::NonDigits(na), Chunk::NonDigits(nb)) => {
-                let ord = na.to_lowercase().cmp(&nb.to_lowercase());
-                if ord != Ordering::Equal {
-                    return ord;
+            (false, false) => {
+                // Extract contiguous non-digits
+                let end_a = rem_a
+                    .char_indices()
+                    .find(|(_, c)| c.is_ascii_digit())
+                    .map(|(i, _)| i)
+                    .unwrap_or(rem_a.len());
+                let end_b = rem_b
+                    .char_indices()
+                    .find(|(_, c)| c.is_ascii_digit())
+                    .map(|(i, _)| i)
+                    .unwrap_or(rem_b.len());
+                let slice_a = &rem_a[..end_a];
+                let slice_b = &rem_b[..end_b];
+                rem_a = &rem_a[end_a..];
+                rem_b = &rem_b[end_b..];
+
+                let mut it_a = slice_a.chars().flat_map(|c| c.to_lowercase());
+                let mut it_b = slice_b.chars().flat_map(|c| c.to_lowercase());
+
+                loop {
+                    match (it_a.next(), it_b.next()) {
+                        (Some(ca), Some(cb)) => {
+                            let ord = ca.cmp(&cb);
+                            if ord != Ordering::Equal {
+                                return ord;
+                            }
+                        }
+                        (Some(_), None) => return Ordering::Greater,
+                        (None, Some(_)) => return Ordering::Less,
+                        (None, None) => break,
+                    }
                 }
-            }
-            (Chunk::Digits(_), Chunk::NonDigits(_)) => {
-                return Ordering::Less;
-            }
-            (Chunk::NonDigits(_), Chunk::Digits(_)) => {
-                return Ordering::Greater;
             }
         }
-        i += 1;
     }
 
-    chunks_a.len().cmp(&chunks_b.len())
+    rem_a.len().cmp(&rem_b.len())
 }
 
 #[cfg(test)]
