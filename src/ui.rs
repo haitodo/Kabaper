@@ -1960,6 +1960,9 @@ fn handle_bar_click(state: &mut AppState, x: i32, _y: i32) {
         675..=730 => {
             state.modal_dialog = ModalDialog::Settings;
         }
+        735..=805 => {
+            state.modal_dialog = ModalDialog::Shortcuts;
+        }
         _ => {}
     }
 }
@@ -2061,8 +2064,26 @@ pub unsafe fn create_gui_font(hwnd: HWND, size_pt: i32, weight: i32) -> HFONT {
             CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY,
             0,
-            w!("Segoe UI"),
+            w!("Yu Gothic UI"),
         );
+        if font.0.is_null() {
+            font = CreateFontW(
+                height,
+                0,
+                0,
+                0,
+                weight,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                0,
+                w!("Segoe UI"),
+            );
+        }
         if font.0.is_null() {
             font = CreateFontW(
                 height,
@@ -2088,6 +2109,127 @@ pub unsafe fn create_gui_font(hwnd: HWND, size_pt: i32, weight: i32) -> HFONT {
     }
 }
 
+// ============================================================================
+// Google Material Design 3 Expressive Tonal Color System & Modern Helpers
+// ============================================================================
+
+#[inline]
+pub const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
+    COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16))
+}
+
+pub const M3_BG: COLORREF = rgb(15, 17, 19);                 // #0F1113 Deep background
+pub const M3_SURFACE_BAR: COLORREF = rgb(26, 29, 32);         // #1A1D20 App bar surface
+pub const M3_SURFACE_CARD: COLORREF = rgb(34, 37, 42);        // #22252A Modal / Dialog surface
+pub const M3_SURFACE_HIGH: COLORREF = rgb(44, 48, 54);        // #2C3036 Button surface
+pub const M3_SURFACE_HIGHEST: COLORREF = rgb(53, 58, 66);     // #353A42 Active control / inputs
+pub const M3_OUTLINE: COLORREF = rgb(62, 68, 77);             // #3E444D Distinct outline
+pub const M3_OUTLINE_VARIANT: COLORREF = rgb(45, 50, 58);     // #2D323A Subtle border / divider
+pub const M3_PRIMARY_BLUE: COLORREF = rgb(11, 87, 208);       // #0B57D0 Google Blue Primary
+pub const M3_PRIMARY_TEXT: COLORREF = rgb(255, 255, 255);     // #FFFFFF Primary text on dark/blue
+pub const M3_PRIMARY_ACCENT: COLORREF = rgb(168, 199, 250);   // #A8C7FA Google Blue tint
+pub const M3_SECONDARY_MINT: COLORREF = rgb(109, 213, 140);   // #6DD58C Google Mint Green (Success/OSD)
+pub const M3_CYAN_PINNED: COLORREF = rgb(128, 216, 255);      // #80D8FF Cyan for Pinned state
+pub const M3_AMBER_BADGE: COLORREF = rgb(255, 183, 77);       // #FFB74D Amber for limits/warnings
+pub const M3_TEXT_PRIMARY: COLORREF = rgb(240, 243, 248);     // #F0F3F8 High-emphasis text
+pub const M3_TEXT_SECONDARY: COLORREF = rgb(176, 180, 188);   // #B0B4BC Medium-emphasis text
+pub const M3_TEXT_MUTED: COLORREF = rgb(117, 123, 133);       // #757B85 Low-emphasis text
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModernButtonStyle {
+    Primary,         // Google Blue, White text, 8px radius
+    SecondaryTonal,  // Surface High, Text Primary, subtle border, 8px radius
+    SegmentActive,   // Primary Accent border, container fill, 8px radius
+    SegmentInactive, // Low container, Text Secondary, 8px radius
+    Ghost,           // Low contrast, Text Secondary, 8px radius
+}
+
+pub unsafe fn draw_round_rect_fill_stroke(
+    hdc: HDC,
+    rect: &RECT,
+    fill_color: COLORREF,
+    stroke_color: Option<COLORREF>,
+    radius: i32,
+) {
+    unsafe {
+        let brush = CreateSolidBrush(fill_color);
+        let old_brush = SelectObject(hdc, brush.into());
+        let (pen, old_pen) = if let Some(sc) = stroke_color {
+            let pen = CreatePen(PS_SOLID, 1, sc);
+            let old_pen = SelectObject(hdc, pen.into());
+            (Some(pen), Some(old_pen))
+        } else {
+            let pen = CreatePen(PS_NULL, 0, COLORREF(0));
+            let old_pen = SelectObject(hdc, pen.into());
+            (Some(pen), Some(old_pen))
+        };
+
+        let _ = RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+
+        if let (Some(pen), Some(old_pen)) = (pen, old_pen) {
+            let _ = SelectObject(hdc, old_pen);
+            let _ = DeleteObject(pen.into());
+        }
+        let _ = SelectObject(hdc, old_brush);
+        let _ = DeleteObject(brush.into());
+    }
+}
+
+pub unsafe fn draw_modern_button(
+    hdc: HDC,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    text: &str,
+    style: ModernButtonStyle,
+    radius: i32,
+) {
+    unsafe {
+        let r = RECT {
+            left: x,
+            top: y,
+            right: x + w,
+            bottom: y + h,
+        };
+
+        let (fill, stroke, text_color) = match style {
+            ModernButtonStyle::Primary => (
+                M3_PRIMARY_BLUE,
+                Some(rgb(168, 199, 250)),
+                M3_PRIMARY_TEXT,
+            ),
+            ModernButtonStyle::SecondaryTonal => (
+                M3_SURFACE_HIGH,
+                Some(M3_OUTLINE),
+                M3_TEXT_PRIMARY,
+            ),
+            ModernButtonStyle::SegmentActive => (
+                rgb(26, 52, 85),
+                Some(M3_PRIMARY_ACCENT),
+                M3_PRIMARY_ACCENT,
+            ),
+            ModernButtonStyle::SegmentInactive => (
+                M3_SURFACE_CARD,
+                Some(M3_OUTLINE_VARIANT),
+                M3_TEXT_MUTED,
+            ),
+            ModernButtonStyle::Ghost => (
+                M3_SURFACE_BAR,
+                Some(M3_OUTLINE_VARIANT),
+                M3_TEXT_SECONDARY,
+            ),
+        };
+
+        draw_round_rect_fill_stroke(hdc, &r, fill, stroke, radius);
+
+        let _ = SetBkMode(hdc, TRANSPARENT);
+        let _ = SetTextColor(hdc, text_color);
+        let mut tr = r;
+        draw_text(hdc, text, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
 unsafe fn draw_empty_state_guidance(hdc: HDC, win_w: i32, win_h: i32, bar_h: i32, msg: &str) {
     unsafe {
         let btn_r = empty_state_folder_btn_rect(win_w, win_h, bar_h);
@@ -2095,19 +2237,21 @@ unsafe fn draw_empty_state_guidance(hdc: HDC, win_w: i32, win_h: i32, bar_h: i32
             left: 20,
             top: bar_h + (win_h - bar_h) / 2 - 50,
             right: win_w - 20,
-            bottom: btn_r.top - 10,
+            bottom: btn_r.top - 14,
         };
-        let _ = SetTextColor(hdc, COLORREF(0x00B0B0B0));
+        let _ = SetTextColor(hdc, M3_TEXT_SECONDARY);
         let _ = SetBkMode(hdc, TRANSPARENT);
         draw_text(hdc, msg, &mut tr, DT_CENTER | DT_WORDBREAK);
 
-        draw_bar_btn(
+        draw_modern_button(
             hdc,
             btn_r.left,
             btn_r.top,
             btn_r.right - btn_r.left,
             btn_r.bottom - btn_r.top,
-            "フォルダを選択 (Enter)",
+            "フォルダを選択",
+            ModernButtonStyle::Primary,
+            8,
         );
     }
 }
@@ -2321,8 +2465,8 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
         let font = create_gui_font(hwnd, 10, 400);
         let old_font = SelectObject(mem_dc, font.into());
 
-        // Fill background
-        let bg_brush = CreateSolidBrush(COLORREF(0x00121212));
+        // Fill background with Google Material 3 Deep Surface
+        let bg_brush = CreateSolidBrush(M3_BG);
         let _ = FillRect(mem_dc, &cr, bg_brush);
         let _ = DeleteObject(bg_brush.into());
 
@@ -2556,38 +2700,39 @@ fn draw_operation_bar(state: &AppState, hdc: HDC, width: i32) {
             left: 0,
             top: 0,
             right: width,
-            bottom: 44,
+            bottom: 45,
         };
-        let brush = CreateSolidBrush(COLORREF(0x00242424));
+        let brush = CreateSolidBrush(M3_SURFACE_BAR);
         let _ = FillRect(hdc, &bar_rect, brush);
         let _ = DeleteObject(brush.into());
 
-        let line_brush = CreateSolidBrush(COLORREF(0x00333333));
+        let line_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
         let line_r = RECT {
             left: 0,
-            top: 43,
+            top: 44,
             right: width,
-            bottom: 44,
+            bottom: 45,
         };
         let _ = FillRect(hdc, &line_r, line_brush);
         let _ = DeleteObject(line_brush.into());
 
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
 
-        draw_bar_btn(hdc, 10, 6, 80, 32, "開く (Ctrl+O)");
+        // Group 1: Source & View Controls
+        draw_modern_button(hdc, 10, 6, 80, 32, "開く", ModernButtonStyle::SecondaryTonal, 8);
         let view_txt = if state.view_mode == ViewMode::Normal {
-            "通常 (V)"
+            "通常"
         } else {
-            "合成 (V)"
+            "合成"
         };
-        draw_bar_btn(hdc, 95, 6, 65, 32, view_txt);
+        draw_modern_button(hdc, 95, 6, 65, 32, view_txt, ModernButtonStyle::SegmentActive, 8);
 
+        // Group 2: Target & Layout Controls
         let mon_str = format!(
-            "モニタ: #{}",
+            "モニタ {}",
             state.target_monitor().map_or(1, |m| m.number)
         );
-        draw_bar_btn(hdc, 165, 6, 75, 32, &mon_str);
+        draw_modern_button(hdc, 165, 6, 75, 32, &mon_str, ModernButtonStyle::SecondaryTonal, 8);
 
         let split_str = match state.config.layout.mode.as_str() {
             "single" => "分割: 1",
@@ -2595,37 +2740,33 @@ fn draw_operation_bar(state: &AppState, hdc: HDC, width: i32) {
             "split3" => "分割: 3",
             _ => "分割: 自動",
         };
-        draw_bar_btn(hdc, 245, 6, 70, 32, split_str);
+        draw_modern_button(hdc, 245, 6, 70, 32, split_str, ModernButtonStyle::SecondaryTonal, 8);
 
-        let scale_str = format!("M: {:.2}", state.config.layout.max_scale);
-        draw_bar_btn(hdc, 320, 6, 65, 32, &scale_str);
+        let scale_str = format!("倍率 {:.2}", state.config.layout.max_scale);
+        draw_modern_button(hdc, 320, 6, 65, 32, &scale_str, ModernButtonStyle::SecondaryTonal, 8);
 
-        draw_bar_btn(hdc, 390, 6, 60, 32, "適用 ↵");
-        draw_bar_btn(hdc, 455, 6, 65, 32, "ランダム R");
-        draw_bar_btn(hdc, 525, 6, 70, 32, "戻す ^Z");
-        draw_bar_btn(hdc, 600, 6, 70, 32, "PNG保存 S");
-        draw_bar_btn(hdc, 675, 6, 55, 32, "設定");
+        // Group 3: Primary Action (Material 3 Expressive FAB Pill)
+        draw_modern_button(hdc, 390, 6, 60, 32, "適用", ModernButtonStyle::Primary, 8);
+
+        // Group 4: Secondary & Undo Controls
+        draw_modern_button(hdc, 455, 6, 65, 32, "ランダム", ModernButtonStyle::SecondaryTonal, 8);
+        draw_modern_button(hdc, 525, 6, 70, 32, "元に戻す", ModernButtonStyle::SecondaryTonal, 8);
+
+        // Group 5: Utility & Settings & Shortcuts
+        draw_modern_button(hdc, 600, 6, 70, 32, "PNG保存", ModernButtonStyle::Ghost, 8);
+        draw_modern_button(hdc, 675, 6, 55, 32, "設定", ModernButtonStyle::Ghost, 8);
+        draw_modern_button(hdc, 735, 6, 70, 32, "操作一覧", ModernButtonStyle::Ghost, 8);
 
         if state.has_pinned_frames() {
-            draw_badge(hdc, width - 110, 10, "合成固定中", COLORREF(0x000088FF));
+            draw_badge(hdc, width - 110, 11, "合成固定中", M3_CYAN_PINNED);
         }
     }
 }
 
+#[allow(dead_code)]
 fn draw_bar_btn(hdc: HDC, x: i32, y: i32, w: i32, h: i32, text: &str) {
     unsafe {
-        let r = RECT {
-            left: x,
-            top: y,
-            right: x + w,
-            bottom: y + h,
-        };
-        let brush = CreateSolidBrush(COLORREF(0x003A3A3A));
-        let _ = FillRect(hdc, &r, brush);
-        let _ = DeleteObject(brush.into());
-
-        let mut tr = r;
-        draw_text(hdc, text, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        draw_modern_button(hdc, x, y, w, h, text, ModernButtonStyle::SecondaryTonal, 8);
     }
 }
 
@@ -2683,14 +2824,14 @@ fn draw_overlay_btn(hdc: HDC, x: i32, y: i32, w: i32, h: i32, text: &str) {
             right: x + w,
             bottom: y + h,
         };
-        fill_alpha_rect(hdc, &r, COLORREF(0x00202020), 190);
+        fill_alpha_rect(hdc, &r, M3_SURFACE_HIGH, 210);
 
-        let border_brush = CreateSolidBrush(COLORREF(0x00666666));
+        let border_brush = CreateSolidBrush(M3_OUTLINE);
         let _ = FrameRect(hdc, &r, border_brush);
         let _ = DeleteObject(border_brush.into());
 
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
+        let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
         let mut tr = r;
         draw_text(hdc, text, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
@@ -2699,21 +2840,21 @@ fn draw_overlay_btn(hdc: HDC, x: i32, y: i32, w: i32, h: i32, text: &str) {
 fn draw_badge(hdc: HDC, x: i32, y: i32, text: &str, color: COLORREF) {
     unsafe {
         let w = osd_text_display_width(text) + 16;
-        let h = 20;
+        let h = 22;
         let r = RECT {
             left: x,
             top: y,
             right: x + w,
             bottom: y + h,
         };
-        fill_alpha_rect(hdc, &r, color, 200);
+        fill_alpha_rect(hdc, &r, color, 190);
 
-        let border_brush = CreateSolidBrush(COLORREF(0x00444444));
+        let border_brush = CreateSolidBrush(color);
         let _ = FrameRect(hdc, &r, border_brush);
         let _ = DeleteObject(border_brush.into());
 
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
+        let _ = SetTextColor(hdc, M3_PRIMARY_TEXT);
         let mut tr = r;
         draw_text(hdc, text, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
@@ -2730,14 +2871,14 @@ fn draw_info_overlay(state: &AppState, hdc: HDC, win_h: i32) {
             bottom: win_h - 16,
         };
 
-        fill_alpha_rect(hdc, &r, COLORREF(0x00141414), 180);
+        // Material 3 Frosted Glass Surface
+        fill_alpha_rect(hdc, &r, M3_SURFACE_CARD, 210);
 
-        let border_brush = CreateSolidBrush(COLORREF(0x00555555));
+        let border_brush = CreateSolidBrush(M3_OUTLINE);
         let _ = FrameRect(hdc, &r, border_brush);
         let _ = DeleteObject(border_brush.into());
 
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(0x00E0E0E0));
 
         let filename = state
             .catalog
@@ -2746,7 +2887,8 @@ fn draw_info_overlay(state: &AppState, hdc: HDC, win_h: i32) {
         let idx = state.catalog.current_index.map_or(0, |i| i + 1);
         let total = state.catalog.items.len();
 
-        let line1 = format!("{}  ({} / {})", filename, idx, total);
+        let line1_name = filename;
+        let line1_idx = format!("({} / {})", idx, total);
         let line2 = if let Some(plan) = &state.active_plan {
             format!(
                 "解像度: {}x{}  被覆率: {:.1}%",
@@ -2762,27 +2904,40 @@ fn draw_info_overlay(state: &AppState, hdc: HDC, win_h: i32) {
             state.config.layout.max_scale, state.config.layout.border_px
         );
 
-        let mut r1 = RECT {
-            left: r.left + 10,
-            top: r.top + 8,
-            right: r.right - 10,
-            bottom: r.top + 30,
+        let mut r1_name = RECT {
+            left: r.left + 14,
+            top: r.top + 10,
+            right: r.right - 80,
+            bottom: r.top + 32,
+        };
+        let mut r1_idx = RECT {
+            left: r.right - 80,
+            top: r.top + 10,
+            right: r.right - 14,
+            bottom: r.top + 32,
         };
         let mut r2 = RECT {
-            left: r.left + 10,
-            top: r.top + 35,
-            right: r.right - 10,
-            bottom: r.top + 57,
+            left: r.left + 14,
+            top: r.top + 38,
+            right: r.right - 14,
+            bottom: r.top + 60,
         };
         let mut r3 = RECT {
-            left: r.left + 10,
-            top: r.top + 62,
-            right: r.right - 10,
-            bottom: r.top + 84,
+            left: r.left + 14,
+            top: r.top + 65,
+            right: r.right - 14,
+            bottom: r.top + 87,
         };
 
-        draw_text(hdc, &line1, &mut r1, DT_LEFT | DT_SINGLELINE);
+        let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
+        draw_text(hdc, line1_name, &mut r1_name, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        let _ = SetTextColor(hdc, M3_PRIMARY_ACCENT);
+        draw_text(hdc, &line1_idx, &mut r1_idx, DT_RIGHT | DT_SINGLELINE);
+
+        let _ = SetTextColor(hdc, M3_TEXT_SECONDARY);
         draw_text(hdc, &line2, &mut r2, DT_LEFT | DT_SINGLELINE);
+
+        let _ = SetTextColor(hdc, M3_TEXT_MUTED);
         draw_text(hdc, &line3, &mut r3, DT_LEFT | DT_SINGLELINE);
     }
 }
@@ -2791,16 +2946,16 @@ fn draw_osd_notification(hdc: HDC, text: &str, win_w: i32, has_undo: bool) {
     unsafe {
         let r = osd_notification_rect(text, win_w, has_undo);
 
-        let brush = CreateSolidBrush(COLORREF(0x002B2B2B));
+        let brush = CreateSolidBrush(rgb(20, 36, 28)); // Deep emerald container
         let _ = FillRect(hdc, &r, brush);
         let _ = DeleteObject(brush.into());
 
-        let border_brush = CreateSolidBrush(COLORREF(0x00555555));
+        let border_brush = CreateSolidBrush(rgb(42, 85, 62)); // Subtle mint outline
         let _ = FrameRect(hdc, &r, border_brush);
         let _ = DeleteObject(border_brush.into());
 
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(0x0000FF99));
+        let _ = SetTextColor(hdc, M3_SECONDARY_MINT);
 
         let mut tr = RECT {
             left: r.left + 16,
@@ -2812,13 +2967,15 @@ fn draw_osd_notification(hdc: HDC, text: &str, win_w: i32, has_undo: bool) {
 
         if has_undo {
             let btn_r = osd_undo_button_rect(text, win_w);
-            draw_bar_btn(
+            draw_modern_button(
                 hdc,
                 btn_r.left,
                 btn_r.top,
                 btn_r.right - btn_r.left,
                 btn_r.bottom - btn_r.top,
-                "元に戻す ^Z",
+                "元に戻す",
+                ModernButtonStyle::SecondaryTonal,
+                6,
             );
         }
     }
@@ -2833,12 +2990,16 @@ fn draw_error_banner(hdc: HDC, errors: &[String], win_w: i32) {
             right: win_w,
             bottom: 45 + banner_h,
         };
-        let brush = CreateSolidBrush(COLORREF(0x00202088));
+        let brush = CreateSolidBrush(rgb(56, 18, 18)); // M3 Dark Crimson error container
         let _ = FillRect(hdc, &r, brush);
         let _ = DeleteObject(brush.into());
 
+        let border_brush = CreateSolidBrush(rgb(110, 35, 35));
+        let _ = FrameRect(hdc, &r, border_brush);
+        let _ = DeleteObject(border_brush.into());
+
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
+        let _ = SetTextColor(hdc, rgb(255, 218, 214));
 
         let msg = errors.join(" | ");
         let mut tr = RECT {
@@ -2864,142 +3025,120 @@ fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
             bottom: by + box_h,
         };
 
-        let brush = CreateSolidBrush(COLORREF(0x001F1F1F));
+        // Material 3 Modal Card Surface
+        let brush = CreateSolidBrush(M3_SURFACE_CARD);
         let _ = FillRect(hdc, &modal_r, brush);
         let _ = DeleteObject(brush.into());
 
-        let border_brush = CreateSolidBrush(COLORREF(0x00555555));
+        let border_brush = CreateSolidBrush(M3_OUTLINE);
         let _ = FrameRect(hdc, &modal_r, border_brush);
         let _ = DeleteObject(border_brush.into());
 
+        // Header Divider
+        let div_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
+        let div_r = RECT {
+            left: bx + 16,
+            top: by + 50,
+            right: bx + box_w - 16,
+            bottom: by + 51,
+        };
+        let _ = FillRect(hdc, &div_r, div_brush);
+        let _ = DeleteObject(div_brush.into());
+
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
+        let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
 
         let mut tr = RECT {
-            left: bx + 20,
+            left: bx + 24,
             top: by + 16,
-            right: bx + box_w - 20,
+            right: bx + box_w - 24,
             bottom: by + 45,
         };
         draw_text(hdc, "設定", &mut tr, DT_LEFT | DT_SINGLELINE);
 
+        let _ = SetTextColor(hdc, M3_TEXT_SECONDARY);
+
         // Row 1: Max Scale M
         let mut r1 = RECT {
-            left: bx + 20,
+            left: bx + 24,
             top: by + 65,
             right: bx + 150,
             bottom: by + 90,
         };
         draw_text(hdc, "最大拡大率 M:", &mut r1, DT_LEFT | DT_SINGLELINE);
-        draw_bar_btn(hdc, bx + 160, by + 60, 40, 28, "-");
+        draw_modern_button(hdc, bx + 160, by + 60, 40, 28, "-", ModernButtonStyle::SecondaryTonal, 6);
         let m_str = format!("{:.2}", state.config.layout.max_scale);
-        draw_bar_btn(hdc, bx + 210, by + 60, 60, 28, &m_str);
-        draw_bar_btn(hdc, bx + 280, by + 60, 40, 28, "+");
+        draw_modern_button(hdc, bx + 210, by + 60, 60, 28, &m_str, ModernButtonStyle::SegmentActive, 6);
+        draw_modern_button(hdc, bx + 280, by + 60, 40, 28, "+", ModernButtonStyle::SecondaryTonal, 6);
 
         // Row 2: Border px
         let mut r2 = RECT {
-            left: bx + 20,
+            left: bx + 24,
             top: by + 110,
             right: bx + 150,
             bottom: by + 135,
         };
         draw_text(hdc, "境界線幅:", &mut r2, DT_LEFT | DT_SINGLELINE);
-        draw_bar_btn(hdc, bx + 160, by + 105, 40, 28, "-");
+        draw_modern_button(hdc, bx + 160, by + 105, 40, 28, "-", ModernButtonStyle::SecondaryTonal, 6);
         let b_str = format!("{} px", state.config.layout.border_px);
-        draw_bar_btn(hdc, bx + 210, by + 105, 60, 28, &b_str);
-        draw_bar_btn(hdc, bx + 280, by + 105, 40, 28, "+");
+        draw_modern_button(hdc, bx + 210, by + 105, 60, 28, &b_str, ModernButtonStyle::SegmentActive, 6);
+        draw_modern_button(hdc, bx + 280, by + 105, 40, 28, "+", ModernButtonStyle::SecondaryTonal, 6);
 
         // Row 3: Random split mode
         let mut r3 = RECT {
-            left: bx + 20,
+            left: bx + 24,
             top: by + 155,
             right: bx + 150,
             bottom: by + 180,
         };
         draw_text(hdc, "ランダム分割:", &mut r3, DT_LEFT | DT_SINGLELINE);
         let r_mode = state.config.random.mode.as_str();
-        draw_bar_btn(
-            hdc,
-            bx + 160,
-            by + 150,
-            60,
-            28,
-            if r_mode == "auto" {
-                "【自動】"
+        let modes = [("自動", "auto", bx + 160, 55), ("1枠", "single", bx + 225, 48), ("2枠", "split2", bx + 280, 48), ("3枠", "split3", bx + 335, 48)];
+        for (lbl, val, btn_x, btn_w) in modes {
+            let is_sel = r_mode == val;
+            let style = if is_sel {
+                ModernButtonStyle::SegmentActive
             } else {
-                "自動"
-            },
-        );
-        draw_bar_btn(
-            hdc,
-            bx + 225,
-            by + 150,
-            50,
-            28,
-            if r_mode == "single" {
-                "【1枠】"
-            } else {
-                "1枠"
-            },
-        );
-        draw_bar_btn(
-            hdc,
-            bx + 280,
-            by + 150,
-            50,
-            28,
-            if r_mode == "split2" {
-                "【2枠】"
-            } else {
-                "2枠"
-            },
-        );
-        draw_bar_btn(
-            hdc,
-            bx + 335,
-            by + 150,
-            50,
-            28,
-            if r_mode == "split3" {
-                "【3枠】"
-            } else {
-                "3枠"
-            },
-        );
+                ModernButtonStyle::SegmentInactive
+            };
+            draw_modern_button(hdc, btn_x, by + 150, btn_w, 28, lbl, style, 6);
+        }
 
         // Row 4: Schedule enabled
         let mut r4 = RECT {
-            left: bx + 20,
+            left: bx + 24,
             top: by + 200,
             right: bx + 150,
             bottom: by + 225,
         };
         draw_text(hdc, "定期更新:", &mut r4, DT_LEFT | DT_SINGLELINE);
-        let en_str = if state.config.schedule.enabled {
-            "【有効】"
+        let en_style = if state.config.schedule.enabled {
+            ModernButtonStyle::SegmentActive
         } else {
-            "無効"
+            ModernButtonStyle::SegmentInactive
         };
-        draw_bar_btn(hdc, bx + 160, by + 195, 100, 28, en_str);
+        let en_str = if state.config.schedule.enabled { "有効 (ON)" } else { "無効 (OFF)" };
+        draw_modern_button(hdc, bx + 160, by + 195, 100, 28, en_str, en_style, 6);
 
         // Row 5: Schedule on logon
         let mut r5 = RECT {
-            left: bx + 20,
+            left: bx + 24,
             top: by + 245,
             right: bx + 150,
             bottom: by + 270,
         };
         draw_text(hdc, "ログオン時更新:", &mut r5, DT_LEFT | DT_SINGLELINE);
-        let log_str = if state.config.schedule.on_logon {
-            "【有効】"
+        let log_style = if state.config.schedule.on_logon {
+            ModernButtonStyle::SegmentActive
         } else {
-            "無効"
+            ModernButtonStyle::SegmentInactive
         };
-        draw_bar_btn(hdc, bx + 160, by + 240, 100, 28, log_str);
+        let log_str = if state.config.schedule.on_logon { "有効 (ON)" } else { "無効 (OFF)" };
+        draw_modern_button(hdc, bx + 160, by + 240, 100, 28, log_str, log_style, 6);
 
         // Row 6: Schedule interval
         let mut r6 = RECT {
-            left: bx + 20,
+            left: bx + 24,
             top: by + 290,
             right: bx + 150,
             bottom: by + 315,
@@ -3011,10 +3150,10 @@ fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
             m if m >= 60 => format!("{}時間 (クリックで変更)", m / 60),
             m => format!("{}分 (クリックで変更)", m),
         };
-        draw_bar_btn(hdc, bx + 160, by + 285, 200, 28, &int_str);
+        draw_modern_button(hdc, bx + 160, by + 285, 200, 28, &int_str, ModernButtonStyle::SecondaryTonal, 6);
 
-        // Close button
-        draw_bar_btn(hdc, bx + 200, by + 375, 120, 34, "閉じる (Esc)");
+        // Close button: Primary Pill Button
+        draw_modern_button(hdc, bx + 200, by + 375, 120, 34, "閉じる", ModernButtonStyle::Primary, 8);
     }
 }
 
@@ -3031,21 +3170,33 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
             bottom: by + box_h,
         };
 
-        let brush = CreateSolidBrush(COLORREF(0x001F1F1F));
+        // Material 3 Modal Card Surface
+        let brush = CreateSolidBrush(M3_SURFACE_CARD);
         let _ = FillRect(hdc, &modal_r, brush);
         let _ = DeleteObject(brush.into());
 
-        let border_brush = CreateSolidBrush(COLORREF(0x00555555));
+        let border_brush = CreateSolidBrush(M3_OUTLINE);
         let _ = FrameRect(hdc, &modal_r, border_brush);
         let _ = DeleteObject(border_brush.into());
 
+        // Header Divider
+        let div_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
+        let div_r = RECT {
+            left: bx + 16,
+            top: by + 50,
+            right: bx + box_w - 16,
+            bottom: by + 51,
+        };
+        let _ = FillRect(hdc, &div_r, div_brush);
+        let _ = DeleteObject(div_brush.into());
+
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
+        let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
 
         let mut tr = RECT {
-            left: bx + 20,
+            left: bx + 24,
             top: by + 16,
-            right: bx + box_w - 20,
+            right: bx + box_w - 24,
             bottom: by + 45,
         };
         draw_text(hdc, "除外画像一覧", &mut tr, DT_LEFT | DT_SINGLELINE);
@@ -3065,6 +3216,7 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
                 right: bx + box_w - 30,
                 bottom: by + 100,
             };
+            let _ = SetTextColor(hdc, M3_TEXT_MUTED);
             draw_text(
                 hdc,
                 "現在のフォルダに除外画像はありません。",
@@ -3072,6 +3224,7 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
                 DT_LEFT | DT_SINGLELINE,
             );
         } else {
+            let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
             for (i, (fname, _)) in excluded_in_folder.iter().take(5).enumerate() {
                 let row_y = by + 60 + (i as i32) * 36;
                 let mut r_item = RECT {
@@ -3081,11 +3234,11 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
                     bottom: row_y + 28,
                 };
                 draw_text(hdc, fname, &mut r_item, DT_LEFT | DT_SINGLELINE);
-                draw_bar_btn(hdc, bx + 440, row_y, 60, 26, "解除");
+                draw_modern_button(hdc, bx + 440, row_y, 60, 26, "解除", ModernButtonStyle::SecondaryTonal, 6);
             }
         }
 
-        draw_bar_btn(hdc, bx + 30, by + 250, 220, 30, "このフォルダを一括解除");
+        draw_modern_button(hdc, bx + 30, by + 250, 220, 30, "このフォルダを一括解除", ModernButtonStyle::SecondaryTonal, 6);
 
         let total_ex = state.catalog.excluded_paths.len();
         let other_count = total_ex.saturating_sub(excluded_in_folder.len());
@@ -3095,13 +3248,14 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
             right: bx + box_w - 30,
             bottom: by + 320,
         };
+        let _ = SetTextColor(hdc, M3_TEXT_SECONDARY);
         let other_txt = format!("他フォルダの除外パス: {}件", other_count);
         draw_text(hdc, &other_txt, &mut r_other, DT_LEFT | DT_SINGLELINE);
 
-        draw_bar_btn(hdc, bx + 30, by + 325, 200, 30, "存在しないパスを整理");
-        draw_bar_btn(hdc, bx + 245, by + 325, 200, 30, "他フォルダ分を一括解除");
+        draw_modern_button(hdc, bx + 30, by + 325, 200, 30, "存在しないパスを整理", ModernButtonStyle::SecondaryTonal, 6);
+        draw_modern_button(hdc, bx + 245, by + 325, 200, 30, "他フォルダ分を一括解除", ModernButtonStyle::SecondaryTonal, 6);
 
-        draw_bar_btn(hdc, bx + 210, by + 380, 120, 34, "閉じる (Esc)");
+        draw_modern_button(hdc, bx + 210, by + 380, 120, 34, "閉じる", ModernButtonStyle::Primary, 8);
     }
 }
 
@@ -3118,61 +3272,83 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32) {
             bottom: by + box_h,
         };
 
-        let brush = CreateSolidBrush(COLORREF(0x001F1F1F));
+        // Material 3 Modal Card Surface
+        let brush = CreateSolidBrush(M3_SURFACE_CARD);
         let _ = FillRect(hdc, &modal_r, brush);
         let _ = DeleteObject(brush.into());
 
-        let border_brush = CreateSolidBrush(COLORREF(0x00555555));
+        let border_brush = CreateSolidBrush(M3_OUTLINE);
         let _ = FrameRect(hdc, &modal_r, border_brush);
         let _ = DeleteObject(border_brush.into());
 
+        // Header Divider
+        let div_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
+        let div_r = RECT {
+            left: bx + 16,
+            top: by + 50,
+            right: bx + box_w - 16,
+            bottom: by + 51,
+        };
+        let _ = FillRect(hdc, &div_r, div_brush);
+        let _ = DeleteObject(div_brush.into());
+
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
+        let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
 
         let mut tr = RECT {
-            left: bx + 20,
+            left: bx + 24,
             top: by + 16,
-            right: bx + box_w - 20,
+            right: bx + box_w - 24,
             bottom: by + 45,
         };
         draw_text(hdc, "操作一覧", &mut tr, DT_LEFT | DT_SINGLELINE);
 
         let lines = [
-            "ホイール / → / ← / ↑ / ↓ : 画像送り",
-            "Home / End : 先頭 / 末尾",
-            "V / 中クリック : 通常 / 合成 切替",
-            "Tab / Shift+Tab : 枠選択",
-            "Space : 選択枠のピン留め切替",
-            "Shift+Space : 枠の入れ替え",
-            "左ドラッグ / Shift+矢印 : パン調整",
-            "C : パン位置リセット",
-            "L / Shift+L : 分割モード切替",
-            "Ctrl+ホイール / + / - : 拡大率変更",
-            "1〜9 : モニター選択",
-            "Enter : 壁紙適用",
-            "Ctrl+1〜9 : 指定モニターへ即時適用",
-            "R : 全モニターランダム更新",
-            "Ctrl+Z : 元に戻す",
-            "S / Ctrl+S : PNG保存",
-            "Del : 除外切替",
-            "Ctrl+O : フォルダ選択",
-            "F5 : 再読込",
-            "I : 情報表示切替",
-            "F11 / Alt+Enter : 全画面切替",
-            "Esc : 閉じる",
+            ("ホイール / → / ← / ↑ / ↓", "画像送り"),
+            ("Home / End", "先頭 / 末尾"),
+            ("V / 中クリック", "通常 / 合成 切替"),
+            ("Tab / Shift+Tab", "枠選択"),
+            ("Space", "選択枠のピン留め切替"),
+            ("Shift+Space", "枠の入れ替え"),
+            ("左ドラッグ / Shift+矢印", "パン調整"),
+            ("C", "パン位置リセット"),
+            ("L / Shift+L", "分割モード切替"),
+            ("Ctrl+ホイール / + / -", "拡大率変更"),
+            ("1〜9", "モニター選択"),
+            ("Enter", "壁紙適用"),
+            ("Ctrl+1〜9", "指定モニターへ即時適用"),
+            ("R", "全モニターランダム更新"),
+            ("Ctrl+Z", "元に戻す"),
+            ("S / Ctrl+S", "PNG保存"),
+            ("Del", "除外切替"),
+            ("Ctrl+O", "フォルダ選択"),
+            ("F5", "再読込"),
+            ("I", "情報表示切替"),
+            ("F11 / Alt+Enter", "全画面切替"),
+            ("Esc", "閉じる"),
         ];
 
-        for (i, line) in lines.iter().enumerate() {
-            let mut lr = RECT {
-                left: bx + 30,
-                top: by + 55 + (i as i32) * 18,
-                right: bx + box_w - 30,
-                bottom: by + 75 + (i as i32) * 18,
+        for (i, (key, desc)) in lines.iter().enumerate() {
+            let row_top = by + 58 + (i as i32) * 18;
+            let mut lr_key = RECT {
+                left: bx + 24,
+                top: row_top,
+                right: bx + 240,
+                bottom: row_top + 18,
             };
-            draw_text(hdc, line, &mut lr, DT_LEFT | DT_SINGLELINE);
+            let mut lr_desc = RECT {
+                left: bx + 240,
+                top: row_top,
+                right: bx + box_w - 24,
+                bottom: row_top + 18,
+            };
+            let _ = SetTextColor(hdc, M3_PRIMARY_ACCENT);
+            draw_text(hdc, key, &mut lr_key, DT_LEFT | DT_SINGLELINE);
+            let _ = SetTextColor(hdc, M3_TEXT_SECONDARY);
+            draw_text(hdc, desc, &mut lr_desc, DT_LEFT | DT_SINGLELINE);
         }
 
-        draw_bar_btn(hdc, bx + 180, by + 465, 120, 34, "閉じる (Esc)");
+        draw_modern_button(hdc, bx + 180, by + 465, 120, 34, "閉じる", ModernButtonStyle::Primary, 8);
     }
 }
 
@@ -3239,19 +3415,14 @@ unsafe extern "system" fn overlay_wnd_proc(
                 let mut cr = RECT::default();
                 let _ = GetClientRect(hwnd, &mut cr);
 
-                let brush = CreateSolidBrush(COLORREF(0x00222222));
-                let _ = FillRect(hdc, &cr, brush);
-                let _ = DeleteObject(brush.into());
-
-                let border_brush = CreateSolidBrush(COLORREF(0x0000CCFF));
-                let _ = FrameRect(hdc, &cr, border_brush);
-                let _ = DeleteObject(border_brush.into());
+                // Google Material 3 Elevated Display Indicator HUD
+                draw_round_rect_fill_stroke(hdc, &cr, M3_SURFACE_CARD, Some(M3_PRIMARY_ACCENT), 24);
 
                 let num = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
                 let text = format!("{}", num);
 
                 let _ = SetBkMode(hdc, TRANSPARENT);
-                let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
+                let _ = SetTextColor(hdc, M3_PRIMARY_ACCENT);
 
                 let font = create_gui_font(hwnd, 54, 700);
                 let old_font = SelectObject(hdc, font.into());
