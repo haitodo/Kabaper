@@ -1,3 +1,4 @@
+use rand::seq::IndexedRandom;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -239,6 +240,102 @@ impl Catalog {
         }
 
         None
+    }
+
+    pub fn choose_random_candidate(
+        &self,
+        current_path: Option<&Path>,
+        excluded_ids: &HashSet<PathBuf>,
+    ) -> Option<(usize, PathBuf)> {
+        if self.items.is_empty() {
+            return None;
+        }
+
+        let cur_norm = current_path.map(normalize_path);
+        let is_current = |p: &Path| {
+            if let Some(cp) = current_path {
+                p == cp || cur_norm.as_deref() == Some(p) || (cur_norm.is_some() && normalize_path(p) == *cur_norm.as_ref().unwrap())
+            } else {
+                false
+            }
+        };
+        let is_in_excluded_ids = |p: &Path| {
+            excluded_ids.contains(p) || excluded_ids.contains(&normalize_path(p))
+        };
+
+        // 1. First priority: valid images (!excluded, no failure, not in excluded_ids, and not current)
+        let valid_other_candidates: Vec<(usize, &CatalogItem)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| {
+                !it.is_excluded
+                    && it.failure_reason.is_none()
+                    && !is_in_excluded_ids(&it.path)
+                    && !is_current(&it.path)
+            })
+            .collect();
+
+        let mut rng = rand::rng();
+        if let Some((idx, it)) = valid_other_candidates.choose(&mut rng) {
+            return Some((*idx, it.path.clone()));
+        }
+
+        // 2. Second priority: valid images including current_path (if current is valid and not in excluded_ids)
+        // This handles cases where only 1 valid candidate exists in total.
+        let valid_candidates: Vec<(usize, &CatalogItem)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| {
+                !it.is_excluded
+                    && it.failure_reason.is_none()
+                    && !is_in_excluded_ids(&it.path)
+            })
+            .collect();
+
+        if let Some((idx, it)) = valid_candidates.choose(&mut rng) {
+            return Some((*idx, it.path.clone()));
+        }
+
+        // 3. Third priority (fallback): any images with no failure that are not in excluded_ids and not current
+        let non_failing_other: Vec<(usize, &CatalogItem)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| {
+                it.failure_reason.is_none()
+                    && !is_in_excluded_ids(&it.path)
+                    && !is_current(&it.path)
+            })
+            .collect();
+
+        if let Some((idx, it)) = non_failing_other.choose(&mut rng) {
+            return Some((*idx, it.path.clone()));
+        }
+
+        // 4. Fallback to any non-failing not in excluded_ids
+        let non_failing: Vec<(usize, &CatalogItem)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| it.failure_reason.is_none() && !is_in_excluded_ids(&it.path))
+            .collect();
+
+        non_failing
+            .choose(&mut rng)
+            .map(|(idx, it)| (*idx, it.path.clone()))
+    }
+
+    pub fn select_random(&mut self) -> Option<&CatalogItem> {
+        let cur_path = self.current_item().map(|it| it.path.clone());
+        let empty_set = HashSet::new();
+        if let Some((idx, _)) = self.choose_random_candidate(cur_path.as_deref(), &empty_set) {
+            self.current_index = Some(idx);
+            self.current_item()
+        } else {
+            None
+        }
     }
 }
 
@@ -507,5 +604,49 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_catalog_choose_random_candidate() {
+        let mut catalog = Catalog::new(HashSet::new());
+        catalog.items = vec![
+            CatalogItem {
+                path: PathBuf::from("img1.jpg"),
+                filename: "img1.jpg".into(),
+                is_excluded: false,
+                failure_reason: None,
+            },
+            CatalogItem {
+                path: PathBuf::from("img2.jpg"),
+                filename: "img2.jpg".into(),
+                is_excluded: false,
+                failure_reason: None,
+            },
+            CatalogItem {
+                path: PathBuf::from("img3.jpg"),
+                filename: "img3.jpg".into(),
+                is_excluded: true, // excluded
+                failure_reason: None,
+            },
+            CatalogItem {
+                path: PathBuf::from("img4.jpg"),
+                filename: "img4.jpg".into(),
+                is_excluded: false,
+                failure_reason: Some("corrupt".into()),
+            },
+        ];
+        catalog.current_index = Some(0);
+
+        // When current is img1, random candidate should pick img2 (only other valid, non-excluded, non-failed)
+        let empty_set = HashSet::new();
+        let candidate = catalog.choose_random_candidate(Some(Path::new("img1.jpg")), &empty_set);
+        assert_eq!(candidate, Some((1, PathBuf::from("img2.jpg"))));
+
+        // When img2 is also in excluded_ids (e.g. used by another frame), candidate falls back
+        let mut used = HashSet::new();
+        used.insert(PathBuf::from("img2.jpg"));
+        let candidate2 = catalog.choose_random_candidate(Some(Path::new("img1.jpg")), &used);
+        // Valid priority 2 allows current_path if not in used
+        assert_eq!(candidate2, Some((0, PathBuf::from("img1.jpg"))));
     }
 }

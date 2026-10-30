@@ -5,7 +5,7 @@ use kabaper::layout::*;
 use kabaper::store::{AppConfig, Storage};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn test_acceptance_10_1_layout_formulas_and_auto_mode() {
@@ -848,6 +848,122 @@ fn test_acceptance_minimize_preserves_active_composed_and_releases_prefetch() {
             .cached_images
             .contains_key(&ImageId("img2.jpg".into())),
         "Prefetch img2 must be released on minimize"
+    );
+
+    let _ = fs::remove_dir_all(&temp);
+}
+
+fn create_valid_test_bmp(path: &Path) {
+    let data = vec![
+        0x42, 0x4D, // "BM"
+        58, 0, 0, 0, // file size
+        0, 0, 0, 0, // reserved
+        54, 0, 0, 0, // offset to pixel data
+        40, 0, 0, 0, // DIB header size
+        1, 0, 0, 0, // width = 1
+        1, 0, 0, 0, // height = 1
+        1, 0, // planes = 1
+        24, 0, // bits per pixel = 24
+        0, 0, 0, 0, // compression = 0
+        4, 0, 0, 0, // image size (4 bytes with padding)
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // extra header fields
+        255, 0, 0, 0, // BGR + 1 byte padding
+    ];
+    fs::write(path, data).unwrap();
+}
+
+#[test]
+fn test_acceptance_random_image_normal_view() {
+    let temp = std::env::temp_dir().join(format!("kabaper_test_rnd_norm_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).unwrap();
+
+    let p1 = temp.join("img1.bmp");
+    let p2 = temp.join("img2.bmp");
+    let p3 = temp.join("img3.bmp");
+    create_valid_test_bmp(&p1);
+    create_valid_test_bmp(&p2);
+    create_valid_test_bmp(&p3);
+
+    let storage_dir = temp.join("storage");
+    let storage = Storage::init_with_dir(storage_dir).unwrap();
+    let mut state = kabaper::ui::AppState::new(storage, AppConfig::default(), Some(&temp)).unwrap();
+
+    state.view_mode = kabaper::ui::ViewMode::Normal;
+    assert_eq!(state.view_mode, kabaper::ui::ViewMode::Normal);
+    assert_eq!(state.catalog.items.len(), 3);
+    let initial_idx = state.catalog.current_index.unwrap();
+
+    // Call random_image: should pick a different candidate
+    state.random_image();
+    let new_idx = state.catalog.current_index.unwrap();
+    assert_ne!(
+        initial_idx, new_idx,
+        "random_image in normal view should select a different image"
+    );
+
+    // Verify layout frame 0 is updated when unpinned
+    let current_path = &state.catalog.items[new_idx].path;
+    assert_eq!(
+        state.layout_frames[0].image.as_ref().unwrap().id.0,
+        current_path.to_string_lossy()
+    );
+
+    let _ = fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn test_acceptance_random_image_composite_view() {
+    let temp = std::env::temp_dir().join(format!("kabaper_test_rnd_comp_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).unwrap();
+
+    let p1 = temp.join("img1.bmp");
+    let p2 = temp.join("img2.bmp");
+    let p3 = temp.join("img3.bmp");
+    create_valid_test_bmp(&p1);
+    create_valid_test_bmp(&p2);
+    create_valid_test_bmp(&p3);
+
+    let storage_dir = temp.join("storage");
+    let storage = Storage::init_with_dir(storage_dir).unwrap();
+    let mut state = kabaper::ui::AppState::new(storage, AppConfig::default(), Some(&temp)).unwrap();
+
+    // Switch to composite view with 2 frames
+    state.view_mode = kabaper::ui::ViewMode::Composite;
+    state.config.layout.mode = "split2".to_string();
+    state.rebuild_layout(true, true);
+
+    assert_eq!(state.layout_frames.len(), 2);
+    state.selected_frame_idx = 0;
+    let frame0_orig_id = state.layout_frames[0].image.as_ref().unwrap().id.0.clone();
+    let frame1_id = state.layout_frames[1].image.as_ref().unwrap().id.0.clone();
+
+    // Randomize frame 0: must not pick frame 1's image and should pick img3 (the remaining one)
+    state.random_image();
+    let frame0_new_id = state.layout_frames[0].image.as_ref().unwrap().id.0.clone();
+    assert_ne!(
+        frame0_orig_id, frame0_new_id,
+        "Frame 0 should change to a different image"
+    );
+    assert_ne!(
+        frame1_id, frame0_new_id,
+        "Frame 0 should not duplicate frame 1's image"
+    );
+    assert_eq!(
+        state.layout_frames[0].pan,
+        (0.5, 0.5),
+        "Pan should be reset to (0.5, 0.5) on random swap"
+    );
+
+    // If frame 0 is pinned, random_image should NOT change it
+    state.layout_frames[0].pinned = true;
+    let pinned_id = state.layout_frames[0].image.as_ref().unwrap().id.0.clone();
+    state.random_image();
+    assert_eq!(
+        state.layout_frames[0].image.as_ref().unwrap().id.0,
+        pinned_id,
+        "Pinned frame must not be changed by random_image"
     );
 
     let _ = fs::remove_dir_all(&temp);

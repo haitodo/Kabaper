@@ -682,6 +682,96 @@ impl AppState {
         }
     }
 
+    pub fn random_image(&mut self) {
+        if self.view_mode == ViewMode::Normal {
+            if self.catalog.items.is_empty() {
+                self.set_osd("画像がありません".to_string(), 2, false);
+                return;
+            }
+            if self.catalog.items.len() == 1 {
+                self.set_osd("画像が1枚のみです".to_string(), 2, false);
+                return;
+            }
+
+            let cur_path = self.catalog.current_item().map(|it| it.path.clone());
+            let empty_set = HashSet::new();
+            if let Some((idx, _)) =
+                self.catalog
+                    .choose_random_candidate(cur_path.as_deref(), &empty_set)
+            {
+                self.catalog.current_index = Some(idx);
+                if !self.has_pinned_frames() {
+                    self.rebuild_layout(true, true);
+                }
+                if let Some(item) = self.catalog.current_item() {
+                    self.set_osd(format!("ランダム: {}", item.filename), 2, false);
+                }
+            } else {
+                self.set_osd("候補画像がありません".to_string(), 2, false);
+            }
+        } else {
+            if let Some(frame) = self.layout_frames.get(self.selected_frame_idx)
+                && frame.pinned
+            {
+                self.set_osd("ピン留め中".to_string(), 2, false);
+                return;
+            }
+
+            if self.catalog.items.is_empty() {
+                self.set_osd("画像がありません".to_string(), 2, false);
+                return;
+            }
+
+            let mut other_used = HashSet::new();
+            for (idx, f) in self.layout_frames.iter().enumerate() {
+                if idx != self.selected_frame_idx
+                    && let Some(img) = &f.image
+                {
+                    other_used.insert(PathBuf::from(&img.id.0));
+                }
+            }
+
+            let current_path = self
+                .layout_frames
+                .get(self.selected_frame_idx)
+                .and_then(|f| f.image.as_ref())
+                .map(|img| PathBuf::from(&img.id.0));
+
+            if let Some((_, next_path)) =
+                self.catalog
+                    .choose_random_candidate(current_path.as_deref(), &other_used)
+            {
+                if current_path.as_ref() == Some(&next_path) {
+                    self.set_osd("変更可能な別候補がありません".to_string(), 2, false);
+                    return;
+                }
+                if let Ok(spec) = self.decoder.read_image_spec(&next_path) {
+                    if self.selected_frame_idx < self.layout_frames.len() {
+                        self.layout_frames[self.selected_frame_idx].image = Some(spec);
+                        self.layout_frames[self.selected_frame_idx].pan = (0.5, 0.5);
+                        if self.selected_frame_idx == 0 {
+                            self.catalog.select_by_path(&next_path);
+                        }
+                    }
+                    self.rebuild_layout(false, false);
+                    let filename = next_path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    self.set_osd(
+                        format!("枠{} ランダム: {}", self.selected_frame_idx + 1, filename),
+                        2,
+                        false,
+                    );
+                } else {
+                    self.set_osd("画像の読み込みに失敗しました".to_string(), 2, true);
+                }
+            } else {
+                self.set_osd("変更可能な別候補がありません".to_string(), 2, false);
+            }
+        }
+    }
+
     pub fn switch_view_mode(&mut self) {
         if self.view_mode == ViewMode::Normal {
             self.view_mode = ViewMode::Composite;
@@ -1528,15 +1618,19 @@ unsafe extern "system" fn wnd_proc(
                         let btn_y = fy + fh - 34;
 
                         if y >= btn_y && y <= btn_y + 26 {
-                            if x >= fx + 8 && x <= fx + 63 {
+                            if x >= fx + 8 && x <= fx + 58 {
                                 state.toggle_pin();
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                                 return LRESULT(0);
-                            } else if x >= fx + 68 && x <= fx + 133 {
+                            } else if x >= fx + 62 && x <= fx + 112 {
                                 state.swap_frames();
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                                 return LRESULT(0);
-                            } else if x >= fx + 138 && x <= fx + 193 {
+                            } else if x >= fx + 116 && x <= fx + 174 {
+                                state.random_image();
+                                let _ = InvalidateRect(Some(hwnd), None, false);
+                                return LRESULT(0);
+                            } else if x >= fx + 178 && x <= fx + 236 {
                                 state.toggle_exclude_current();
                                 let _ = InvalidateRect(Some(hwnd), None, false);
                                 return LRESULT(0);
@@ -1714,7 +1808,13 @@ unsafe extern "system" fn wnd_proc(
                             state.apply_current_wallpaper();
                         }
                     }
-                    VK_R => state.trigger_random_update(),
+                    VK_R => {
+                        if shift || ctrl {
+                            state.random_image();
+                        } else {
+                            state.trigger_random_update();
+                        }
+                    }
                     VK_Z if ctrl => state.undo_wallpaper(),
                     VK_S => state.export_png_dialog(),
                     VK_DELETE => state.toggle_exclude_current(),
@@ -1980,13 +2080,14 @@ fn handle_bar_click(state: &mut AppState, x: i32, _y: i32) {
         245..=315 => state.cycle_layout_mode(true),
         320..=385 => state.adjust_max_scale(0.05),
         390..=450 => state.apply_current_wallpaper(),
-        455..=520 => state.trigger_random_update(),
-        525..=595 => state.undo_wallpaper(),
-        600..=670 => state.export_png_dialog(),
-        675..=730 => {
+        455..=520 => state.random_image(),
+        525..=600 => state.trigger_random_update(),
+        605..=675 => state.undo_wallpaper(),
+        680..=750 => state.export_png_dialog(),
+        755..=810 => {
             state.modal_dialog = ModalDialog::Settings;
         }
-        735..=805 => {
+        815..=885 => {
             state.modal_dialog = ModalDialog::Shortcuts;
         }
         _ => {}
@@ -2467,11 +2568,11 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
             }
             ModalDialog::Shortcuts => {
                 let box_w = 480;
-                let box_h = 520;
+                let box_h = 540;
                 let bx = (win_w - box_w) / 2;
                 let by = (win_h - box_h) / 2;
 
-                if x >= bx + 180 && x <= bx + 300 && y >= by + 460 && y <= by + 496 {
+                if x >= bx + 180 && x <= bx + 300 && y >= by + 480 && y <= by + 525 {
                     state.modal_dialog = ModalDialog::None;
                 }
             }
@@ -2563,11 +2664,12 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                             let _ = FrameRect(mem_dc, &frame_r, select_brush);
                             let _ = DeleteObject(select_brush.into());
 
-                            // Spec 4.1: Frame action buttons (ピン, 枠交換, 除外)
+                            // Spec 4.1: Frame action buttons (ピン, 枠交換, ランダム, 除外)
                             let btn_y = fy + fh - 34;
                             let pin_txt = if frame.pinned { "解除" } else { "ピン" };
-                            draw_overlay_btn(mem_dc, fx + 8, btn_y, 55, 26, pin_txt);
-                            draw_overlay_btn(mem_dc, fx + 68, btn_y, 65, 26, "枠交換");
+                            draw_overlay_btn(mem_dc, fx + 8, btn_y, 50, 26, pin_txt);
+                            draw_overlay_btn(mem_dc, fx + 62, btn_y, 50, 26, "枠交換");
+                            draw_overlay_btn(mem_dc, fx + 116, btn_y, 58, 26, "ランダム");
                             let ex_txt =
                                 if let Some(c) = &frame.content {
                                     if state.catalog.items.iter().any(|it| {
@@ -2580,7 +2682,7 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                                 } else {
                                     "除外"
                                 };
-                            draw_overlay_btn(mem_dc, fx + 138, btn_y, 55, 26, ex_txt);
+                            draw_overlay_btn(mem_dc, fx + 178, btn_y, 58, 26, ex_txt);
                         }
 
                         let mut badge_y = fy + 8;
@@ -2785,12 +2887,13 @@ fn draw_operation_bar(state: &AppState, hdc: HDC, width: i32) {
 
         // Group 4: Secondary & Undo Controls
         draw_modern_button(hdc, 455, 6, 65, 32, "ランダム", ModernButtonStyle::SecondaryTonal, 8);
-        draw_modern_button(hdc, 525, 6, 70, 32, "元に戻す", ModernButtonStyle::SecondaryTonal, 8);
+        draw_modern_button(hdc, 525, 6, 75, 32, "壁紙更新", ModernButtonStyle::SecondaryTonal, 8);
+        draw_modern_button(hdc, 605, 6, 70, 32, "元に戻す", ModernButtonStyle::SecondaryTonal, 8);
 
         // Group 5: Utility & Settings & Shortcuts
-        draw_modern_button(hdc, 600, 6, 70, 32, "PNG保存", ModernButtonStyle::Ghost, 8);
-        draw_modern_button(hdc, 675, 6, 55, 32, "設定", ModernButtonStyle::Ghost, 8);
-        draw_modern_button(hdc, 735, 6, 70, 32, "操作一覧", ModernButtonStyle::Ghost, 8);
+        draw_modern_button(hdc, 680, 6, 70, 32, "PNG保存", ModernButtonStyle::Ghost, 8);
+        draw_modern_button(hdc, 755, 6, 55, 32, "設定", ModernButtonStyle::Ghost, 8);
+        draw_modern_button(hdc, 815, 6, 70, 32, "操作一覧", ModernButtonStyle::Ghost, 8);
 
         if state.has_pinned_frames() {
             draw_badge(hdc, width - 110, 11, "合成固定中", M3_CYAN_PINNED);
@@ -3297,7 +3400,7 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
 fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32) {
     unsafe {
         let box_w = 480;
-        let box_h = 520;
+        let box_h = 540;
         let bx = (win_w - box_w) / 2;
         let by = (win_h - box_h) / 2;
         let modal_r = RECT {
@@ -3340,6 +3443,7 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32) {
 
         let lines = [
             ("ホイール / → / ← / ↑ / ↓", "画像送り"),
+            ("Shift+R / Ctrl+R", "画像のランダム入替"),
             ("Home / End", "先頭 / 末尾"),
             ("V / 中クリック", "通常 / 合成 切替"),
             ("Tab / Shift+Tab", "枠選択"),
@@ -3383,7 +3487,7 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32) {
             draw_text(hdc, desc, &mut lr_desc, DT_LEFT | DT_SINGLELINE);
         }
 
-        draw_modern_button(hdc, bx + 180, by + 465, 120, 34, "閉じる", ModernButtonStyle::Primary, 8);
+        draw_modern_button(hdc, bx + 180, by + 485, 120, 34, "閉じる", ModernButtonStyle::Primary, 8);
     }
 }
 
@@ -3489,6 +3593,7 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
         let menu = CreatePopupMenu().unwrap();
         let _ = AppendMenuW(menu, MF_STRING, 1001, w!("フォルダを開く (Ctrl+O)"));
         let _ = AppendMenuW(menu, MF_STRING, 1002, w!("再読込 (F5)"));
+        let _ = AppendMenuW(menu, MF_STRING, 1006, w!("画像をランダム入替 (Shift+R)"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
         let _ = AppendMenuW(menu, MF_STRING, 1003, w!("除外一覧"));
         let _ = AppendMenuW(menu, MF_STRING, 1004, w!("設定"));
@@ -3512,6 +3617,7 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
                 state.catalog.reload();
                 state.rebuild_layout(true, true);
             }
+            1006 => state.random_image(),
             1003 => state.modal_dialog = ModalDialog::ExcludeList,
             1004 => state.modal_dialog = ModalDialog::Settings,
             1005 => state.modal_dialog = ModalDialog::Shortcuts,
