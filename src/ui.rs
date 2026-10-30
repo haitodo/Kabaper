@@ -955,6 +955,30 @@ impl AppState {
         }
     }
 
+    pub fn trigger_random_update(&mut self) {
+        let storage_ref = &self.storage;
+        let cfg_ref = &self.config;
+        let mut mgr_ref = self.wallpaper_mgr.take();
+        match execute_random_update(storage_ref, cfg_ref, false, &mut mgr_ref) {
+            Ok(succ) => {
+                self.wallpaper_mgr = mgr_ref;
+                self.set_osd(
+                    format!(
+                        "全{}台の壁紙をランダム更新しました",
+                        succ.applied_monitors.len()
+                    ),
+                    6,
+                    true,
+                );
+                self.rebuild_layout(false, false);
+            }
+            Err(e) => {
+                self.wallpaper_mgr = mgr_ref;
+                self.set_osd(format!("ランダム更新失敗: {:?}", e), 4, false);
+            }
+        }
+    }
+
     pub fn export_png_dialog(&mut self) {
         self.view_mode = ViewMode::Composite;
         self.rebuild_layout(false, false);
@@ -1662,29 +1686,7 @@ unsafe extern "system" fn wnd_proc(
                             state.apply_current_wallpaper();
                         }
                     }
-                    VK_R => {
-                        let storage_ref = &state.storage;
-                        let cfg_ref = &state.config;
-                        let mut mgr_ref = state.wallpaper_mgr.take();
-                        match execute_random_update(storage_ref, cfg_ref, false, &mut mgr_ref) {
-                            Ok(succ) => {
-                                state.wallpaper_mgr = mgr_ref;
-                                state.set_osd(
-                                    format!(
-                                        "全{}台の壁紙をランダム更新しました",
-                                        succ.applied_monitors.len()
-                                    ),
-                                    6,
-                                    true,
-                                );
-                                state.rebuild_layout(false, false);
-                            }
-                            Err(e) => {
-                                state.wallpaper_mgr = mgr_ref;
-                                state.set_osd(format!("ランダム更新失敗: {:?}", e), 4, false);
-                            }
-                        }
-                    }
+                    VK_R => state.trigger_random_update(),
                     VK_Z if ctrl => state.undo_wallpaper(),
                     VK_S => state.export_png_dialog(),
                     VK_DELETE => state.toggle_exclude_current(),
@@ -1947,14 +1949,7 @@ fn handle_bar_click(state: &mut AppState, x: i32, _y: i32) {
         245..=315 => state.cycle_layout_mode(true),
         320..=385 => state.adjust_max_scale(0.05),
         390..=450 => state.apply_current_wallpaper(),
-        455..=520 => {
-            let storage_ref = &state.storage;
-            let cfg_ref = &state.config;
-            let mut mgr_ref = state.wallpaper_mgr.take();
-            let _ = execute_random_update(storage_ref, cfg_ref, false, &mut mgr_ref);
-            state.wallpaper_mgr = mgr_ref;
-            state.rebuild_layout(false, false);
-        }
+        455..=520 => state.trigger_random_update(),
         525..=595 => state.undo_wallpaper(),
         600..=670 => state.export_png_dialog(),
         675..=730 => {
