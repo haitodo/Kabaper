@@ -1759,4 +1759,151 @@ impl AppState {
             }
         }
     }
+
+    pub fn collapse_all_folders(&mut self) {
+        for item in &self.catalog.items {
+            if let Some(parent) = item.path.parent() {
+                self.collapsed_folders.insert(parent.to_path_buf());
+            }
+        }
+        self.sidebar_scroll_offset = 0;
+        self.set_osd("全フォルダを折りたたみました".into(), 2, false);
+    }
+
+    pub fn focus_current_folder(&mut self) {
+        for item in &self.catalog.items {
+            if let Some(parent) = item.path.parent() {
+                self.collapsed_folders.insert(parent.to_path_buf());
+            }
+        }
+        if let Some(cur_idx) = self.current_selected_catalog_index()
+            && let Some(item) = self.catalog.items.get(cur_idx)
+            && let Some(parent) = item.path.parent()
+        {
+            self.collapsed_folders.remove(parent);
+            let name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            self.set_osd(format!("フォルダに集中: {}", name), 2, false);
+        }
+        self.ensure_current_item_visible_in_sidebar();
+    }
+
+    pub fn toggle_folder_collapse_solo(&mut self, target_folder: &Path) {
+        let target_buf = target_folder.to_path_buf();
+        let is_already_only_target = !self.collapsed_folders.contains(&target_buf)
+            && self.catalog.items.iter().all(|it| {
+                if let Some(p) = it.path.parent() {
+                    p == target_folder || self.collapsed_folders.contains(p)
+                } else {
+                    true
+                }
+            });
+
+        if is_already_only_target {
+            self.collapsed_folders.insert(target_buf);
+        } else {
+            for item in &self.catalog.items {
+                if let Some(parent) = item.path.parent() {
+                    if parent != target_folder {
+                        self.collapsed_folders.insert(parent.to_path_buf());
+                    }
+                }
+            }
+            self.collapsed_folders.remove(&target_buf);
+        }
+    }
+
+    pub fn jump_to_next_folder(&mut self) {
+        if self.catalog.items.is_empty() {
+            return;
+        }
+        let cur_idx = self.current_selected_catalog_index().unwrap_or(0);
+        let cur_parent = self
+            .catalog
+            .items
+            .get(cur_idx)
+            .and_then(|it| it.path.parent())
+            .unwrap_or(Path::new(""));
+
+        let mut target = None;
+        for i in (cur_idx + 1)..self.catalog.items.len() {
+            let p = self.catalog.items[i].path.parent().unwrap_or(Path::new(""));
+            if p != cur_parent {
+                target = Some(i);
+                break;
+            }
+        }
+        if target.is_none() {
+            for i in 0..cur_idx {
+                let p = self.catalog.items[i].path.parent().unwrap_or(Path::new(""));
+                if p != cur_parent {
+                    target = Some(i);
+                    break;
+                }
+            }
+        }
+
+        if let Some(idx) = target {
+            self.select_image_by_index(idx);
+            let folder_name = self.catalog.items[idx]
+                .path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("ルート");
+            self.set_osd(format!("次のフォルダへ: {}", folder_name), 2, false);
+        }
+    }
+
+    pub fn jump_to_prev_folder(&mut self) {
+        if self.catalog.items.is_empty() {
+            return;
+        }
+        let cur_idx = self.current_selected_catalog_index().unwrap_or(0);
+        let cur_parent = self
+            .catalog
+            .items
+            .get(cur_idx)
+            .and_then(|it| it.path.parent())
+            .unwrap_or(Path::new(""));
+
+        let mut prev_item_idx = None;
+        for i in (0..cur_idx).rev() {
+            let p = self.catalog.items[i].path.parent().unwrap_or(Path::new(""));
+            if p != cur_parent {
+                prev_item_idx = Some(i);
+                break;
+            }
+        }
+        if prev_item_idx.is_none() {
+            for i in (cur_idx..self.catalog.items.len()).rev() {
+                let p = self.catalog.items[i].path.parent().unwrap_or(Path::new(""));
+                if p != cur_parent {
+                    prev_item_idx = Some(i);
+                    break;
+                }
+            }
+        }
+
+        if let Some(idx) = prev_item_idx {
+            let prev_parent = self.catalog.items[idx].path.parent().unwrap_or(Path::new(""));
+            let mut start_idx = idx;
+            while start_idx > 0 {
+                let p = self.catalog.items[start_idx - 1].path.parent().unwrap_or(Path::new(""));
+                if p == prev_parent {
+                    start_idx -= 1;
+                } else {
+                    break;
+                }
+            }
+
+            self.select_image_by_index(start_idx);
+            let folder_name = self.catalog.items[start_idx]
+                .path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("ルート");
+            self.set_osd(format!("前のフォルダへ: {}", folder_name), 2, false);
+        }
+    }
 }

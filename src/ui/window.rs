@@ -645,7 +645,9 @@ unsafe extern "system" fn wnd_proc(
 
                 match key {
                     VK_RIGHT | VK_DOWN => {
-                        if shift {
+                        if ctrl {
+                            state.jump_to_next_folder();
+                        } else if shift {
                             // Shift+Arrow: Pan selected frame
                             if state.view_mode == ViewMode::Composite {
                                 pan_by_keyboard(state, key);
@@ -661,7 +663,9 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     VK_LEFT | VK_UP => {
-                        if shift {
+                        if ctrl {
+                            state.jump_to_prev_folder();
+                        } else if shift {
                             if state.view_mode == ViewMode::Composite {
                                 pan_by_keyboard(state, key);
                             } else {
@@ -675,6 +679,8 @@ unsafe extern "system" fn wnd_proc(
                             state.prev_image();
                         }
                     }
+                    VK_PRIOR => state.jump_to_prev_folder(),
+                    VK_NEXT => state.jump_to_next_folder(),
                     VK_HOME => state.first_image(),
                     VK_END => state.last_image(),
                     VK_TAB => {
@@ -1435,13 +1441,29 @@ fn handle_sidebar_click(
         dpi,
     );
 
-    // 1. Check close button
+    // 1. Check header buttons
     if x >= layout.close_btn_rect.left
         && x <= layout.close_btn_rect.right
         && y >= layout.close_btn_rect.top
         && y <= layout.close_btn_rect.bottom
     {
         state.show_sidebar = false;
+        return true;
+    }
+    if x >= layout.collapse_all_btn_rect.left
+        && x <= layout.collapse_all_btn_rect.right
+        && y >= layout.collapse_all_btn_rect.top
+        && y <= layout.collapse_all_btn_rect.bottom
+    {
+        state.collapse_all_folders();
+        return true;
+    }
+    if x >= layout.focus_current_btn_rect.left
+        && x <= layout.focus_current_btn_rect.right
+        && y >= layout.focus_current_btn_rect.top
+        && y <= layout.focus_current_btn_rect.bottom
+    {
+        state.focus_current_folder();
         return true;
     }
 
@@ -1461,16 +1483,23 @@ fn handle_sidebar_click(
 
     // 3. Check rows in list
     if y >= layout.list_rect.top && y <= layout.list_rect.bottom {
-        for row in layout.rows {
-            if y >= row.rect.top && y <= row.rect.bottom {
-                match row.kind {
-                    SidebarRowKind::FolderHeader { folder_path, .. } => {
-                        state.toggle_folder_collapse(&folder_path);
-                        return true;
-                    }
-                    SidebarRowKind::FileItem { catalog_index, .. } => {
-                        state.select_image_by_index(catalog_index);
-                        return true;
+        unsafe {
+            let alt_down = (GetKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0;
+            for row in layout.rows {
+                if y >= row.rect.top && y <= row.rect.bottom {
+                    match row.kind {
+                        SidebarRowKind::FolderHeader { folder_path, .. } => {
+                            if alt_down {
+                                state.toggle_folder_collapse_solo(&folder_path);
+                            } else {
+                                state.toggle_folder_collapse(&folder_path);
+                            }
+                            return true;
+                        }
+                        SidebarRowKind::FileItem { catalog_index, .. } => {
+                            state.select_image_by_index(catalog_index);
+                            return true;
+                        }
                     }
                 }
             }

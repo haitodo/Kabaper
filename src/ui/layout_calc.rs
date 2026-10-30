@@ -314,6 +314,8 @@ pub struct SidebarRowLayout {
 pub struct SidebarLayout {
     pub bounds: RECT,
     pub header_rect: RECT,
+    pub focus_current_btn_rect: RECT,
+    pub collapse_all_btn_rect: RECT,
     pub close_btn_rect: RECT,
     pub list_rect: RECT,
     pub rows: Vec<SidebarRowLayout>,
@@ -351,12 +353,36 @@ pub fn compute_sidebar_layout(
         bottom: bar_h + header_h,
     };
 
-    let close_btn_size = scale_by_dpi(28, dpi);
+    let btn_size = scale_by_dpi(26, dpi);
+    let gap = scale_by_dpi(4, dpi);
+    let btn_y = bar_h + (header_h - btn_size) / 2;
+    let btn_bottom = btn_y + btn_size;
+
+    let close_right = sidebar_w - scale_by_dpi(6, dpi);
+    let close_left = close_right - btn_size;
     let close_btn_rect = RECT {
-        left: sidebar_w - close_btn_size - scale_by_dpi(6, dpi),
-        top: bar_h + (header_h - close_btn_size) / 2,
-        right: sidebar_w - scale_by_dpi(6, dpi),
-        bottom: bar_h + (header_h + close_btn_size) / 2,
+        left: close_left,
+        top: btn_y,
+        right: close_right,
+        bottom: btn_bottom,
+    };
+
+    let col_right = close_left - gap;
+    let col_left = col_right - btn_size;
+    let collapse_all_btn_rect = RECT {
+        left: col_left,
+        top: btn_y,
+        right: col_right,
+        bottom: btn_bottom,
+    };
+
+    let focus_right = col_left - gap;
+    let focus_left = focus_right - btn_size;
+    let focus_current_btn_rect = RECT {
+        left: focus_left,
+        top: btn_y,
+        right: focus_right,
+        bottom: btn_bottom,
     };
 
     let list_rect = RECT {
@@ -483,6 +509,8 @@ pub fn compute_sidebar_layout(
     SidebarLayout {
         bounds,
         header_rect,
+        focus_current_btn_rect,
+        collapse_all_btn_rect,
         close_btn_rect,
         list_rect,
         rows,

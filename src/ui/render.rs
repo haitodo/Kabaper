@@ -1509,7 +1509,7 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32, d
 fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
     unsafe {
         let box_w = scale_by_dpi(480, dpi);
-        let box_h = scale_by_dpi(640, dpi);
+        let box_h = scale_by_dpi(680, dpi);
         let bx = (win_w - box_w) / 2;
         let by = (win_h - box_h) / 2;
         let modal_r = RECT {
@@ -1563,6 +1563,8 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
             ("C", "パン位置リセット"),
             ("A", "スマートパン (被写体/顔自動合わせ)"),
             ("B", "サイドバー (ファイル一覧) 切替"),
+            ("Ctrl+↑ / Ctrl+↓", "前のフォルダ / 次のフォルダへ移動"),
+            ("Alt+クリック (見出し)", "フォルダ単独展開 (他を閉じる)"),
             ("T", "フィルムストリップ表示切替"),
             ("L / Shift+L", "分割モード切替"),
             ("Ctrl+ホイール / + / -", "拡大率変更 / ズーム"),
@@ -1608,7 +1610,7 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
         let close_w = scale_by_dpi(120, dpi);
         let close_h = scale_by_dpi(34, dpi);
         let close_x = bx + (box_w - close_w) / 2;
-        let close_y = by + scale_by_dpi(585, dpi);
+        let close_y = by + scale_by_dpi(625, dpi);
         draw_modern_button(
             hdc,
             close_x,
@@ -1761,9 +1763,9 @@ fn draw_sidebar(state: &AppState, hdc: HDC, win_w: i32, win_h: i32, bar_h: i32, 
         let total_items = state.catalog.items.len();
         let header_txt = format!("ファイル一覧 ({}枚)", total_items);
         let mut title_r = RECT {
-            left: layout.header_rect.left + scale_by_dpi(14, dpi),
+            left: layout.header_rect.left + scale_by_dpi(12, dpi),
             top: layout.header_rect.top,
-            right: layout.close_btn_rect.left - scale_by_dpi(6, dpi),
+            right: layout.focus_current_btn_rect.left - scale_by_dpi(4, dpi),
             bottom: layout.header_rect.bottom,
         };
         let _ = SetBkMode(hdc, TRANSPARENT);
@@ -1778,14 +1780,48 @@ fn draw_sidebar(state: &AppState, hdc: HDC, win_w: i32, win_h: i32, bar_h: i32, 
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         );
 
-        // Close button (✕)
-        let mut close_r = layout.close_btn_rect;
-        let _ = SetTextColor(hdc, M3_TEXT_MUTED);
-        draw_text(
+        let btn_radius = scale_by_dpi(6, dpi);
+
+        // Focus current folder button (◎)
+        let fc_w = layout.focus_current_btn_rect.right - layout.focus_current_btn_rect.left;
+        let fc_h = layout.focus_current_btn_rect.bottom - layout.focus_current_btn_rect.top;
+        draw_modern_button(
             hdc,
+            layout.focus_current_btn_rect.left,
+            layout.focus_current_btn_rect.top,
+            fc_w,
+            fc_h,
+            "◎",
+            ModernButtonStyle::Ghost,
+            btn_radius,
+        );
+
+        // Collapse all button (⊟)
+        let col_w = layout.collapse_all_btn_rect.right - layout.collapse_all_btn_rect.left;
+        let col_h = layout.collapse_all_btn_rect.bottom - layout.collapse_all_btn_rect.top;
+        draw_modern_button(
+            hdc,
+            layout.collapse_all_btn_rect.left,
+            layout.collapse_all_btn_rect.top,
+            col_w,
+            col_h,
+            "⊟",
+            ModernButtonStyle::Ghost,
+            btn_radius,
+        );
+
+        // Close button (✕)
+        let cl_w = layout.close_btn_rect.right - layout.close_btn_rect.left;
+        let cl_h = layout.close_btn_rect.bottom - layout.close_btn_rect.top;
+        draw_modern_button(
+            hdc,
+            layout.close_btn_rect.left,
+            layout.close_btn_rect.top,
+            cl_w,
+            cl_h,
             "✕",
-            &mut close_r,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            ModernButtonStyle::Ghost,
+            btn_radius,
         );
 
         // Restore normal font for list

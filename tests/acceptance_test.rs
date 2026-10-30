@@ -1237,5 +1237,28 @@ fn test_acceptance_sidebar_operations() {
     assert_eq!(state.catalog.current_index, Some(0));
     assert_eq!(state.current_selected_catalog_index(), Some(1));
 
+    // Test collapse_all_folders
+    state.collapse_all_folders();
+    assert!(state.collapsed_folders.contains(&temp));
+    assert!(state.collapsed_folders.contains(&sub));
+
+    // Test focus_current_folder (current is sub/b.jpg)
+    state.focus_current_folder();
+    assert!(state.collapsed_folders.contains(&temp));
+    assert!(!state.collapsed_folders.contains(&sub));
+
+    // Test toggle_folder_collapse_solo on root folder
+    state.toggle_folder_collapse_solo(&temp);
+    assert!(!state.collapsed_folders.contains(&temp));
+    assert!(state.collapsed_folders.contains(&sub));
+
+    // Test folder jump (jump_to_next_folder & jump_to_prev_folder)
+    state.view_mode = kabaper::ui::ViewMode::Normal;
+    state.catalog.current_index = Some(0); // in root (temp)
+    state.jump_to_next_folder(); // should jump to sub/b.jpg (idx 1)
+    assert_eq!(state.catalog.current_index, Some(1));
+    state.jump_to_prev_folder(); // should jump back to root/a.jpg (idx 0)
+    assert_eq!(state.catalog.current_index, Some(0));
+
     let _ = fs::remove_dir_all(&temp);
 }

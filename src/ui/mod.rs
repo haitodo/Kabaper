@@ -115,6 +115,10 @@ mod tests {
         assert_eq!(l1.rows.len(), 6);
         let h1_total = l1.total_content_height;
 
+        // Check header buttons layout order (focus < collapse_all < close)
+        assert!(l1.collapse_all_btn_rect.left < l1.close_btn_rect.left);
+        assert!(l1.focus_current_btn_rect.left < l1.collapse_all_btn_rect.left);
+
         // 2. Collapse the subfolder
         collapsed.insert(sub.clone());
         let l2 = compute_sidebar_layout(
