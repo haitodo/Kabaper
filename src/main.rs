@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 pub mod apply;
 pub mod catalog;
 pub mod compose;

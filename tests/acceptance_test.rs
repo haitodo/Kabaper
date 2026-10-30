@@ -127,6 +127,32 @@ fn test_acceptance_10_3_catalog_and_natural_sort() {
     assert_eq!(catalog.first(), None);
     assert_eq!(catalog.last(), None);
     assert_eq!(catalog.get_valid_candidates().len(), 0);
+
+    // Subfolder recursive scan test
+    let temp = std::env::temp_dir().join(format!("kabaper_acc_catalog_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    std::fs::create_dir_all(temp.join("nested/folder")).unwrap();
+    std::fs::write(temp.join("01.jpg"), b"fake").unwrap();
+    std::fs::write(temp.join("nested/02.png"), b"fake").unwrap();
+    std::fs::write(temp.join("nested/folder/03.bmp"), b"fake").unwrap();
+
+    assert!(catalog.open_folder(&temp, None));
+    assert_eq!(catalog.items.len(), 3);
+    assert_eq!(catalog.items[0].filename, "01.jpg");
+    assert_eq!(
+        catalog.items[1].filename,
+        format!("nested{}02.png", std::path::MAIN_SEPARATOR)
+    );
+    assert_eq!(
+        catalog.items[2].filename,
+        format!(
+            "nested{}folder{}03.bmp",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        )
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
 }
 
 #[test]

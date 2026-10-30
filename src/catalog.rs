@@ -58,15 +58,7 @@ impl Catalog {
             return;
         };
 
-        let mut found_paths = Vec::new();
-        if let Ok(entries) = fs::read_dir(folder) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_file() && is_supported_image(&p) {
-                    found_paths.push(normalize_path(&p));
-                }
-            }
-        }
+        let mut found_paths = collect_images_recursive(folder);
 
         // Sort with natural sort order
         found_paths.sort_by(|a, b| natural_cmp(a, b));
@@ -75,11 +67,14 @@ impl Catalog {
         self.items = found_paths
             .into_iter()
             .map(|p| {
-                let filename = p
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or("")
-                    .to_string();
+                let filename = if let Ok(rel) = p.strip_prefix(folder) {
+                    rel.to_string_lossy().to_string()
+                } else {
+                    p.file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
                 let is_excluded = self.excluded_paths.contains(&p);
                 let failure_reason = self.failed_decodes.get(&p).cloned();
                 CatalogItem {
@@ -247,6 +242,47 @@ impl Catalog {
     }
 }
 
+pub fn collect_images_recursive(root: &Path) -> Vec<PathBuf> {
+    let mut images = Vec::new();
+    let mut dirs_to_visit = vec![root.to_path_buf()];
+    let mut visited_dirs = HashSet::new();
+
+    let norm_root = normalize_path(root);
+    visited_dirs.insert(norm_root);
+
+    while let Some(current_dir) = dirs_to_visit.pop() {
+        let Ok(entries) = fs::read_dir(&current_dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+
+            if file_type.is_dir() {
+                // Skip hidden folders (e.g. .git) and recycle bin
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with('.') || name.eq_ignore_ascii_case("$RECYCLE.BIN") {
+                        continue;
+                    }
+                }
+                let norm = normalize_path(&path);
+                if visited_dirs.insert(norm) {
+                    dirs_to_visit.push(path);
+                }
+            } else if file_type.is_file() {
+                if is_supported_image(&path) {
+                    images.push(normalize_path(&path));
+                }
+            }
+        }
+    }
+
+    images
+}
+
 pub fn is_supported_image(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
@@ -279,6 +315,29 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 }
 
 pub fn natural_cmp(a: &Path, b: &Path) -> Ordering {
+    let parent_a: Vec<_> = a
+        .parent()
+        .map(|p| p.components().collect())
+        .unwrap_or_default();
+    let parent_b: Vec<_> = b
+        .parent()
+        .map(|p| p.components().collect())
+        .unwrap_or_default();
+
+    for (ca, cb) in parent_a.iter().zip(parent_b.iter()) {
+        let sa = ca.as_os_str().to_string_lossy();
+        let sb = cb.as_os_str().to_string_lossy();
+        let ord = natural_str_cmp(&sa, &sb);
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+
+    let depth_ord = parent_a.len().cmp(&parent_b.len());
+    if depth_ord != Ordering::Equal {
+        return depth_ord;
+    }
+
     let name_a = a.file_name().and_then(|f| f.to_str()).unwrap_or("");
     let name_b = b.file_name().and_then(|f| f.to_str()).unwrap_or("");
 
@@ -414,5 +473,41 @@ mod tests {
         assert!(!is_supported_image(Path::new("a.webp")));
         assert!(!is_supported_image(Path::new("a.gif")));
         assert!(!is_supported_image(Path::new("a.txt")));
+    }
+
+    #[test]
+    fn test_subfolder_recursive_and_natural_cmp() {
+        let temp_dir = std::env::temp_dir().join(format!("kabaper_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(temp_dir.join("sub1/sub2")).unwrap();
+        fs::create_dir_all(temp_dir.join("sub10")).unwrap();
+
+        fs::write(temp_dir.join("root.jpg"), b"fake").unwrap();
+        fs::write(temp_dir.join("sub1/img1.png"), b"fake").unwrap();
+        fs::write(temp_dir.join("sub1/sub2/deep.bmp"), b"fake").unwrap();
+        fs::write(temp_dir.join("sub10/img2.jpg"), b"fake").unwrap();
+        fs::write(temp_dir.join("sub1/ignored.txt"), b"fake").unwrap();
+
+        let mut catalog = Catalog::new(HashSet::new());
+        assert!(catalog.open_folder(&temp_dir, None));
+        assert_eq!(catalog.items.len(), 4);
+
+        let filenames: Vec<String> = catalog.items.iter().map(|it| it.filename.clone()).collect();
+        // root should come first, then sub1, then sub1/sub2, then sub10
+        assert_eq!(
+            filenames,
+            vec![
+                "root.jpg".to_string(),
+                format!("sub1{}img1.png", std::path::MAIN_SEPARATOR),
+                format!(
+                    "sub1{}sub2{}deep.bmp",
+                    std::path::MAIN_SEPARATOR,
+                    std::path::MAIN_SEPARATOR
+                ),
+                format!("sub10{}img2.jpg", std::path::MAIN_SEPARATOR),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
