@@ -107,7 +107,7 @@ impl Default for WindowConfig {
             height: 800,
             maximized: false,
             fullscreen: false,
-            show_info: true,
+            show_info: false,
         }
     }
 }

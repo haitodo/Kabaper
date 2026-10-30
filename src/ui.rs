@@ -149,7 +149,7 @@ impl AppState {
             scheduler_mgr,
             fullscreen: false,
             normal_window_rect: RECT::default(),
-            show_info: true,
+            show_info: false,
             osd: None,
             error_banner,
             bar_visible: true,
@@ -1698,6 +1698,11 @@ unsafe extern "system" fn wnd_proc(
                         state.show_info = !state.show_info;
                         state.config.window.show_info = state.show_info;
                         state.mark_config_dirty();
+                        state.set_osd(
+                            format!("情報表示: {}", if state.show_info { "ON" } else { "OFF" }),
+                            2,
+                            false,
+                        );
                     }
                     VK_F11 => state.toggle_fullscreen(),
                     VK_F1 | VK_OEM_2 => {
@@ -2382,8 +2387,8 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                             // Spec 4.1: Frame action buttons (ピン, 枠交換, 除外)
                             let btn_y = fy + fh - 34;
                             let pin_txt = if frame.pinned { "解除" } else { "ピン" };
-                            draw_bar_btn(mem_dc, fx + 8, btn_y, 55, 26, pin_txt);
-                            draw_bar_btn(mem_dc, fx + 68, btn_y, 65, 26, "枠交換");
+                            draw_overlay_btn(mem_dc, fx + 8, btn_y, 55, 26, pin_txt);
+                            draw_overlay_btn(mem_dc, fx + 68, btn_y, 65, 26, "枠交換");
                             let ex_txt =
                                 if let Some(c) = &frame.content {
                                     if state.catalog.items.iter().any(|it| {
@@ -2396,7 +2401,7 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                                 } else {
                                     "除外"
                                 };
-                            draw_bar_btn(mem_dc, fx + 138, btn_y, 55, 26, ex_txt);
+                            draw_overlay_btn(mem_dc, fx + 138, btn_y, 55, 26, ex_txt);
                         }
 
                         let mut badge_y = fy + 8;
@@ -2624,6 +2629,73 @@ fn draw_bar_btn(hdc: HDC, x: i32, y: i32, w: i32, h: i32, text: &str) {
     }
 }
 
+unsafe fn fill_alpha_rect(hdc: HDC, rect: &RECT, color: COLORREF, alpha: u8) {
+    let w = rect.right - rect.left;
+    let h = rect.bottom - rect.top;
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    unsafe {
+        let mem_dc = CreateCompatibleDC(Some(hdc));
+        if mem_dc.is_invalid() {
+            return;
+        }
+        let mut bi = BITMAPINFO::default();
+        bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB.0;
+
+        let mut bits = std::ptr::null_mut();
+        if let Ok(bmp) = CreateDIBSection(Some(mem_dc), &bi, DIB_RGB_COLORS, &mut bits, None, 0)
+            && !bits.is_null()
+        {
+            let old_bmp = SelectObject(mem_dc, bmp.into());
+            let r = (color.0 & 0xFF) as u8;
+            let g = ((color.0 >> 8) & 0xFF) as u8;
+            let b = ((color.0 >> 16) & 0xFF) as u8;
+            let p = bits as *mut u32;
+            let pixel = ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
+            for i in 0..(w * h) as isize {
+                *p.offset(i) = pixel;
+            }
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: alpha,
+                AlphaFormat: 0,
+            };
+            let _ = AlphaBlend(hdc, rect.left, rect.top, w, h, mem_dc, 0, 0, w, h, blend);
+            SelectObject(mem_dc, old_bmp);
+            let _ = DeleteObject(bmp.into());
+        }
+        let _ = DeleteDC(mem_dc);
+    }
+}
+
+fn draw_overlay_btn(hdc: HDC, x: i32, y: i32, w: i32, h: i32, text: &str) {
+    unsafe {
+        let r = RECT {
+            left: x,
+            top: y,
+            right: x + w,
+            bottom: y + h,
+        };
+        fill_alpha_rect(hdc, &r, COLORREF(0x00202020), 190);
+
+        let border_brush = CreateSolidBrush(COLORREF(0x00666666));
+        let _ = FrameRect(hdc, &r, border_brush);
+        let _ = DeleteObject(border_brush.into());
+
+        let _ = SetBkMode(hdc, TRANSPARENT);
+        let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
+        let mut tr = r;
+        draw_text(hdc, text, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
 fn draw_badge(hdc: HDC, x: i32, y: i32, text: &str, color: COLORREF) {
     unsafe {
         let w = osd_text_display_width(text) + 16;
@@ -2634,9 +2706,11 @@ fn draw_badge(hdc: HDC, x: i32, y: i32, text: &str, color: COLORREF) {
             right: x + w,
             bottom: y + h,
         };
-        let brush = CreateSolidBrush(color);
-        let _ = FillRect(hdc, &r, brush);
-        let _ = DeleteObject(brush.into());
+        fill_alpha_rect(hdc, &r, color, 200);
+
+        let border_brush = CreateSolidBrush(COLORREF(0x00444444));
+        let _ = FrameRect(hdc, &r, border_brush);
+        let _ = DeleteObject(border_brush.into());
 
         let _ = SetBkMode(hdc, TRANSPARENT);
         let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
@@ -2656,11 +2730,9 @@ fn draw_info_overlay(state: &AppState, hdc: HDC, win_h: i32) {
             bottom: win_h - 16,
         };
 
-        let brush = CreateSolidBrush(COLORREF(0x00202020));
-        let _ = FillRect(hdc, &r, brush);
-        let _ = DeleteObject(brush.into());
+        fill_alpha_rect(hdc, &r, COLORREF(0x00141414), 180);
 
-        let border_brush = CreateSolidBrush(COLORREF(0x00444444));
+        let border_brush = CreateSolidBrush(COLORREF(0x00555555));
         let _ = FrameRect(hdc, &r, border_brush);
         let _ = DeleteObject(border_brush.into());
 
