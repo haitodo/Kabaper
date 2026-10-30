@@ -931,6 +931,7 @@ impl AppState {
         self.selected_frame_idx = next_idx;
         self.set_osd("枠を交換しました".into(), 2, false);
         self.rebuild_layout(false, false);
+        self.ensure_current_item_visible_in_sidebar();
     }
 
     pub fn reset_pan(&mut self) {
@@ -1123,6 +1124,23 @@ impl AppState {
         } else {
             self.catalog.current_item().map(|it| it.path.clone())
         }
+    }
+
+    pub fn current_selected_catalog_index(&self) -> Option<usize> {
+        if self.view_mode == ViewMode::Composite {
+            if let Some(path) = self.current_selected_image_path() {
+                let norm_path = normalize_path(&path);
+                if let Some(idx) = self
+                    .catalog
+                    .items
+                    .iter()
+                    .position(|it| normalize_path(&it.path) == norm_path)
+                {
+                    return Some(idx);
+                }
+            }
+        }
+        self.catalog.current_index
     }
 
     pub fn open_in_explorer(&mut self) {
@@ -1668,7 +1686,7 @@ impl AppState {
     }
 
     pub fn ensure_current_item_visible_in_sidebar(&mut self) {
-        let Some(cur_idx) = self.catalog.current_index else {
+        let Some(cur_idx) = self.current_selected_catalog_index() else {
             return;
         };
         let Some(cur_item) = self.catalog.items.get(cur_idx) else {

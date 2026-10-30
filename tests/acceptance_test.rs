@@ -1203,5 +1203,39 @@ fn test_acceptance_sidebar_operations() {
     state.toggle_sidebar();
     assert!(!state.show_sidebar);
 
+    // Test composite mode: selecting frame 1 (right frame) tracks frame 1's image
+    state.catalog.current_index = Some(0);
+    state.view_mode = kabaper::ui::ViewMode::Composite;
+    state.layout_frames = vec![
+        kabaper::layout::FrameInput {
+            image: Some(kabaper::layout::ImageSpec {
+                id: kabaper::layout::ImageId(temp.join("a.jpg").to_string_lossy().to_string()),
+                size_px: (1920, 1080),
+            }),
+            pinned: false,
+            pan: (0.5, 0.5),
+        },
+        kabaper::layout::FrameInput {
+            image: Some(kabaper::layout::ImageSpec {
+                id: kabaper::layout::ImageId(sub.join("b.jpg").to_string_lossy().to_string()),
+                size_px: (1920, 1080),
+            }),
+            pinned: false,
+            pan: (0.5, 0.5),
+        },
+    ];
+
+    // Frame 0 selected: tracks index 0 ("a.jpg")
+    state.selected_frame_idx = 0;
+    assert_eq!(state.current_selected_catalog_index(), Some(0));
+
+    // Frame 1 selected: tracks index 1 ("b.jpg")
+    state.selected_frame_idx = 1;
+    assert_eq!(state.current_selected_catalog_index(), Some(1));
+    state.ensure_current_item_visible_in_sidebar();
+    // Catalog's current_index is still 0 (frame 0), but sidebar accurately tracks selected frame 1!
+    assert_eq!(state.catalog.current_index, Some(0));
+    assert_eq!(state.current_selected_catalog_index(), Some(1));
+
     let _ = fs::remove_dir_all(&temp);
 }

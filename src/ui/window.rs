@@ -513,6 +513,7 @@ unsafe extern "system" fn wnd_proc(
                             && rel_y < s.y + s.height as i32
                         {
                             state.selected_frame_idx = i;
+                            state.ensure_current_item_visible_in_sidebar();
                             state.is_panning = true;
                             state.pan_start_mouse = (x, y);
                             state.pan_start_val = state
@@ -594,7 +595,7 @@ unsafe extern "system" fn wnd_proc(
                         .collect();
                     let layout = compute_sidebar_layout(
                         &state.catalog,
-                        state.catalog.current_index,
+                        state.current_selected_catalog_index(),
                         &pinned_paths,
                         &state.collapsed_folders,
                         state.sidebar_scroll_offset,
@@ -685,6 +686,7 @@ unsafe extern "system" fn wnd_proc(
                             } else {
                                 (state.selected_frame_idx + 1) % len
                             };
+                            state.ensure_current_item_visible_in_sidebar();
                         } else {
                             state.set_osd("合成表示でのみ有効です (Vキーで切替)".into(), 2, false);
                         }
@@ -1422,7 +1424,7 @@ fn handle_sidebar_click(
 
     let layout = compute_sidebar_layout(
         &state.catalog,
-        state.catalog.current_index,
+        state.current_selected_catalog_index(),
         &pinned_paths,
         &state.collapsed_folders,
         state.sidebar_scroll_offset,

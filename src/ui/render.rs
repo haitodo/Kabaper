@@ -1721,7 +1721,7 @@ fn draw_sidebar(state: &AppState, hdc: HDC, win_w: i32, win_h: i32, bar_h: i32, 
 
         let layout = compute_sidebar_layout(
             &state.catalog,
-            state.catalog.current_index,
+            state.current_selected_catalog_index(),
             &pinned_paths,
             &state.collapsed_folders,
             state.sidebar_scroll_offset,
