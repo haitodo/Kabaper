@@ -207,4 +207,73 @@ mod tests {
             panic!("Expected FileItem row");
         }
     }
+
+    #[test]
+    fn test_shortcuts_modal_layout_and_close_button_hit() {
+        let win_w = 1920;
+        let win_h = 1080;
+        let dpi = 96;
+
+        let layout = get_shortcuts_modal_layout(win_w, win_h, dpi);
+        let card = layout.card_rect;
+        let close_btn = layout.close_btn_rect;
+
+        // Card dimensions (480 x 680 at 96 dpi)
+        assert_eq!(card.right - card.left, 480);
+        assert_eq!(card.bottom - card.top, 680);
+        assert_eq!(card.left, (win_w - 480) / 2);
+        assert_eq!(card.top, (win_h - 680) / 2);
+
+        // Close button must be completely inside the card bounds
+        assert!(close_btn.left >= card.left);
+        assert!(close_btn.right <= card.right);
+        assert!(close_btn.top >= card.top);
+        assert!(close_btn.bottom <= card.bottom);
+
+        // Close button dimensions (120 x 34 at 96 dpi)
+        assert_eq!(close_btn.right - close_btn.left, 120);
+        assert_eq!(close_btn.bottom - close_btn.top, 34);
+
+        // Center of close button must hit
+        let cx = (close_btn.left + close_btn.right) / 2;
+        let cy = (close_btn.top + close_btn.bottom) / 2;
+        assert!(rect_contains(&close_btn, cx, cy));
+
+        // Edges of close button must hit
+        assert!(rect_contains(&close_btn, close_btn.left, close_btn.top));
+        assert!(rect_contains(&close_btn, close_btn.right, close_btn.bottom));
+
+        // Area slightly above the close button must NOT hit
+        assert!(!rect_contains(&close_btn, cx, close_btn.top - 5));
+        assert!(!rect_contains(&close_btn, cx, close_btn.top - 20));
+
+        // Area slightly below the close button must NOT hit
+        assert!(!rect_contains(&close_btn, cx, close_btn.bottom + 5));
+    }
+
+    #[test]
+    fn test_modal_dialog_layouts_contain_close_buttons() {
+        for dpi in [96, 120, 144, 192] {
+            let win_w = 1920;
+            let win_h = 1080;
+
+            let settings = get_settings_modal_layout(win_w, win_h, dpi);
+            assert!(settings.close_btn_rect.left >= settings.card_rect.left);
+            assert!(settings.close_btn_rect.right <= settings.card_rect.right);
+            assert!(settings.close_btn_rect.top >= settings.card_rect.top);
+            assert!(settings.close_btn_rect.bottom <= settings.card_rect.bottom);
+            let s_cx = (settings.close_btn_rect.left + settings.close_btn_rect.right) / 2;
+            let s_cy = (settings.close_btn_rect.top + settings.close_btn_rect.bottom) / 2;
+            assert!(rect_contains(&settings.close_btn_rect, s_cx, s_cy));
+
+            let exclude = get_exclude_list_modal_layout(win_w, win_h, dpi);
+            assert!(exclude.close_btn_rect.left >= exclude.card_rect.left);
+            assert!(exclude.close_btn_rect.right <= exclude.card_rect.right);
+            assert!(exclude.close_btn_rect.top >= exclude.card_rect.top);
+            assert!(exclude.close_btn_rect.bottom <= exclude.card_rect.bottom);
+            let e_cx = (exclude.close_btn_rect.left + exclude.close_btn_rect.right) / 2;
+            let e_cy = (exclude.close_btn_rect.top + exclude.close_btn_rect.bottom) / 2;
+            assert!(rect_contains(&exclude.close_btn_rect, e_cx, e_cy));
+        }
+    }
 }

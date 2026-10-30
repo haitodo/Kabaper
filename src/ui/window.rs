@@ -1169,17 +1169,12 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32, dpi: u32
 
         match state.modal_dialog {
             ModalDialog::Settings => {
-                let box_w = scale_by_dpi(520, dpi);
-                let box_h = scale_by_dpi(430, dpi);
-                let bx = (win_w - box_w) / 2;
-                let by = (win_h - box_h) / 2;
+                let layout = get_settings_modal_layout(win_w, win_h, dpi);
+                let bx = layout.card_rect.left;
+                let by = layout.card_rect.top;
 
                 // Close button
-                let close_w = scale_by_dpi(120, dpi);
-                let close_h = scale_by_dpi(34, dpi);
-                let close_x = bx + (box_w - close_w) / 2;
-                let close_y = by + scale_by_dpi(375, dpi);
-                if x >= close_x && x <= close_x + close_w && y >= close_y && y <= close_y + close_h {
+                if rect_contains(&layout.close_btn_rect, x, y) {
                     state.modal_dialog = ModalDialog::None;
                     return;
                 }
@@ -1304,17 +1299,12 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32, dpi: u32
                 }
             }
             ModalDialog::ExcludeList => {
-                let box_w = scale_by_dpi(540, dpi);
-                let box_h = scale_by_dpi(440, dpi);
-                let bx = (win_w - box_w) / 2;
-                let by = (win_h - box_h) / 2;
+                let layout = get_exclude_list_modal_layout(win_w, win_h, dpi);
+                let bx = layout.card_rect.left;
+                let by = layout.card_rect.top;
 
                 // Close button
-                let close_w = scale_by_dpi(120, dpi);
-                let close_h = scale_by_dpi(34, dpi);
-                let close_x = bx + (box_w - close_w) / 2;
-                let close_y = by + scale_by_dpi(380, dpi);
-                if x >= close_x && x <= close_x + close_w && y >= close_y && y <= close_y + close_h {
+                if rect_contains(&layout.close_btn_rect, x, y) {
                     state.modal_dialog = ModalDialog::None;
                     return;
                 }
@@ -1392,17 +1382,8 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32, dpi: u32
                 }
             }
             ModalDialog::Shortcuts => {
-                let box_w = scale_by_dpi(480, dpi);
-                let box_h = scale_by_dpi(620, dpi);
-                let bx = (win_w - box_w) / 2;
-                let by = (win_h - box_h) / 2;
-
-                let close_w = scale_by_dpi(120, dpi);
-                let close_h = scale_by_dpi(34, dpi);
-                let close_x = bx + (box_w - close_w) / 2;
-                let close_y = by + scale_by_dpi(565, dpi);
-
-                if x >= close_x && x <= close_x + close_w && y >= close_y && y <= close_y + close_h {
+                let layout = get_shortcuts_modal_layout(win_w, win_h, dpi);
+                if rect_contains(&layout.close_btn_rect, x, y) {
                     state.modal_dialog = ModalDialog::None;
                 }
             }

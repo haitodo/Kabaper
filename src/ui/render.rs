@@ -1067,16 +1067,11 @@ fn draw_error_banner(hdc: HDC, errors: &[String], win_w: i32, dpi: u32) {
 
 fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32, dpi: u32) {
     unsafe {
-        let box_w = scale_by_dpi(520, dpi);
-        let box_h = scale_by_dpi(430, dpi);
-        let bx = (win_w - box_w) / 2;
-        let by = (win_h - box_h) / 2;
-        let modal_r = RECT {
-            left: bx,
-            top: by,
-            right: bx + box_w,
-            bottom: by + box_h,
-        };
+        let layout = get_settings_modal_layout(win_w, win_h, dpi);
+        let modal_r = layout.card_rect;
+        let bx = modal_r.left;
+        let by = modal_r.top;
+        let box_w = modal_r.right - modal_r.left;
 
         // Material 3 Modal Card Surface
         let brush = CreateSolidBrush(M3_SURFACE_CARD);
@@ -1337,16 +1332,14 @@ fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32, dpi: 
         );
 
         // Close button: Primary Pill Button
-        let close_w = scale_by_dpi(120, dpi);
-        let close_h = scale_by_dpi(34, dpi);
-        let close_x = bx + (box_w - close_w) / 2;
-        let close_y = by + scale_by_dpi(375, dpi);
+        let cl_w = layout.close_btn_rect.right - layout.close_btn_rect.left;
+        let cl_h = layout.close_btn_rect.bottom - layout.close_btn_rect.top;
         draw_modern_button(
             hdc,
-            close_x,
-            close_y,
-            close_w,
-            close_h,
+            layout.close_btn_rect.left,
+            layout.close_btn_rect.top,
+            cl_w,
+            cl_h,
             "閉じる",
             ModernButtonStyle::Primary,
             scale_by_dpi(8, dpi),
@@ -1356,16 +1349,11 @@ fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32, dpi: 
 
 fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32, dpi: u32) {
     unsafe {
-        let box_w = scale_by_dpi(540, dpi);
-        let box_h = scale_by_dpi(440, dpi);
-        let bx = (win_w - box_w) / 2;
-        let by = (win_h - box_h) / 2;
-        let modal_r = RECT {
-            left: bx,
-            top: by,
-            right: bx + box_w,
-            bottom: by + box_h,
-        };
+        let layout = get_exclude_list_modal_layout(win_w, win_h, dpi);
+        let modal_r = layout.card_rect;
+        let bx = modal_r.left;
+        let by = modal_r.top;
+        let box_w = modal_r.right - modal_r.left;
 
         // Material 3 Modal Card Surface
         let brush = CreateSolidBrush(M3_SURFACE_CARD);
@@ -1489,16 +1477,14 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32, d
             r_radius,
         );
 
-        let close_w = scale_by_dpi(120, dpi);
-        let close_h = scale_by_dpi(34, dpi);
-        let close_x = bx + (box_w - close_w) / 2;
-        let close_y = by + scale_by_dpi(380, dpi);
+        let cl_w = layout.close_btn_rect.right - layout.close_btn_rect.left;
+        let cl_h = layout.close_btn_rect.bottom - layout.close_btn_rect.top;
         draw_modern_button(
             hdc,
-            close_x,
-            close_y,
-            close_w,
-            close_h,
+            layout.close_btn_rect.left,
+            layout.close_btn_rect.top,
+            cl_w,
+            cl_h,
             "閉じる",
             ModernButtonStyle::Primary,
             scale_by_dpi(8, dpi),
@@ -1508,16 +1494,11 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32, d
 
 fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
     unsafe {
-        let box_w = scale_by_dpi(480, dpi);
-        let box_h = scale_by_dpi(680, dpi);
-        let bx = (win_w - box_w) / 2;
-        let by = (win_h - box_h) / 2;
-        let modal_r = RECT {
-            left: bx,
-            top: by,
-            right: bx + box_w,
-            bottom: by + box_h,
-        };
+        let layout = get_shortcuts_modal_layout(win_w, win_h, dpi);
+        let modal_r = layout.card_rect;
+        let bx = modal_r.left;
+        let by = modal_r.top;
+        let box_w = modal_r.right - modal_r.left;
 
         // Material 3 Modal Card Surface
         let brush = CreateSolidBrush(M3_SURFACE_CARD);
@@ -1607,16 +1588,14 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
             draw_text(hdc, desc, &mut lr_desc, DT_LEFT | DT_SINGLELINE);
         }
 
-        let close_w = scale_by_dpi(120, dpi);
-        let close_h = scale_by_dpi(34, dpi);
-        let close_x = bx + (box_w - close_w) / 2;
-        let close_y = by + scale_by_dpi(625, dpi);
+        let cl_w = layout.close_btn_rect.right - layout.close_btn_rect.left;
+        let cl_h = layout.close_btn_rect.bottom - layout.close_btn_rect.top;
         draw_modern_button(
             hdc,
-            close_x,
-            close_y,
-            close_w,
-            close_h,
+            layout.close_btn_rect.left,
+            layout.close_btn_rect.top,
+            cl_w,
+            cl_h,
             "閉じる",
             ModernButtonStyle::Primary,
             scale_by_dpi(8, dpi),

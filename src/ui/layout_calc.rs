@@ -26,6 +26,98 @@ pub fn scale_by_dpi(value: i32, dpi: u32) -> i32 {
     (value * effective_dpi as i32 + 48) / 96
 }
 
+#[inline]
+pub fn rect_contains(rect: &RECT, x: i32, y: i32) -> bool {
+    x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModalCardLayout {
+    pub card_rect: RECT,
+    pub close_btn_rect: RECT,
+}
+
+pub fn get_shortcuts_modal_layout(win_w: i32, win_h: i32, dpi: u32) -> ModalCardLayout {
+    let box_w = scale_by_dpi(480, dpi);
+    let box_h = scale_by_dpi(680, dpi);
+    let bx = (win_w - box_w) / 2;
+    let by = (win_h - box_h) / 2;
+
+    let close_w = scale_by_dpi(120, dpi);
+    let close_h = scale_by_dpi(34, dpi);
+    let close_x = bx + (box_w - close_w) / 2;
+    let close_y = by + scale_by_dpi(625, dpi);
+
+    ModalCardLayout {
+        card_rect: RECT {
+            left: bx,
+            top: by,
+            right: bx + box_w,
+            bottom: by + box_h,
+        },
+        close_btn_rect: RECT {
+            left: close_x,
+            top: close_y,
+            right: close_x + close_w,
+            bottom: close_y + close_h,
+        },
+    }
+}
+
+pub fn get_settings_modal_layout(win_w: i32, win_h: i32, dpi: u32) -> ModalCardLayout {
+    let box_w = scale_by_dpi(520, dpi);
+    let box_h = scale_by_dpi(430, dpi);
+    let bx = (win_w - box_w) / 2;
+    let by = (win_h - box_h) / 2;
+
+    let close_w = scale_by_dpi(120, dpi);
+    let close_h = scale_by_dpi(34, dpi);
+    let close_x = bx + (box_w - close_w) / 2;
+    let close_y = by + scale_by_dpi(375, dpi);
+
+    ModalCardLayout {
+        card_rect: RECT {
+            left: bx,
+            top: by,
+            right: bx + box_w,
+            bottom: by + box_h,
+        },
+        close_btn_rect: RECT {
+            left: close_x,
+            top: close_y,
+            right: close_x + close_w,
+            bottom: close_y + close_h,
+        },
+    }
+}
+
+pub fn get_exclude_list_modal_layout(win_w: i32, win_h: i32, dpi: u32) -> ModalCardLayout {
+    let box_w = scale_by_dpi(540, dpi);
+    let box_h = scale_by_dpi(440, dpi);
+    let bx = (win_w - box_w) / 2;
+    let by = (win_h - box_h) / 2;
+
+    let close_w = scale_by_dpi(120, dpi);
+    let close_h = scale_by_dpi(34, dpi);
+    let close_x = bx + (box_w - close_w) / 2;
+    let close_y = by + scale_by_dpi(380, dpi);
+
+    ModalCardLayout {
+        card_rect: RECT {
+            left: bx,
+            top: by,
+            right: bx + box_w,
+            bottom: by + box_h,
+        },
+        close_btn_rect: RECT {
+            left: close_x,
+            top: close_y,
+            right: close_x + close_w,
+            bottom: close_y + close_h,
+        },
+    }
+}
+
 pub fn get_bar_height(dpi: u32) -> i32 {
     scale_by_dpi(45, dpi)
 }
