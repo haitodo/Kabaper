@@ -4,6 +4,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use rayon::prelude::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
@@ -13,7 +15,10 @@ use windows::core::*;
 
 use crate::apply::WallpaperManager;
 use crate::catalog::{Catalog, is_supported_image, normalize_path};
-use crate::compose::{ComposedBitmap, compose_layout_with_dim, save_png_wic};
+use crate::compose::{
+    ComposedBitmap, compose_base_layer, compose_foreground_layer,
+    compose_single_frame_foreground, save_png_wic,
+};
 use crate::decode::{DecodedImage, ImageDecoder};
 use crate::layout::{
     FrameInput, ImageId, ImageSpec, LayoutMode, LayoutPlan, LayoutRequest, plan_layout,
@@ -37,6 +42,7 @@ pub struct AppState {
     pub selected_frame_idx: usize,
     pub cached_images: HashMap<ImageId, DecodedImage>,
     pub active_plan: Option<LayoutPlan>,
+    pub active_base_layer: Option<ComposedBitmap>,
     pub active_composed: Option<ComposedBitmap>,
     pub wallpaper_mgr: Option<WallpaperManager>,
     pub scheduler_mgr: Option<SchedulerManager>,
@@ -131,6 +137,7 @@ impl AppState {
             selected_frame_idx: 0,
             cached_images: HashMap::new(),
             active_plan: None,
+            active_base_layer: None,
             active_composed: None,
             wallpaper_mgr,
             scheduler_mgr,
@@ -347,8 +354,10 @@ impl AppState {
             }
         }
 
-        // Re-compose layout bitmap
-        let composed = compose_layout_with_dim(&plan, &self.cached_images, self.config.layout.dim_ratio);
+        // Re-compose layout bitmap using base layer cache for instant pan updates
+        let base_layer = compose_base_layer(&plan, &self.cached_images, self.config.layout.dim_ratio);
+        let mut composed = base_layer.clone();
+        compose_foreground_layer(&mut composed, &plan, &self.cached_images);
 
         // Sync frames back
         self.layout_frames = plan
@@ -373,12 +382,68 @@ impl AppState {
         }
 
         self.active_plan = Some(plan);
+        self.active_base_layer = Some(base_layer);
         self.active_composed = Some(composed);
 
         self.prefetch_adjacent_images();
         self.prune_image_cache();
     }
 
+    /// Fast pan update: updates only the foreground of the selected frame without recomputing background blur.
+    pub fn update_pan_fast(&mut self, frame_idx: usize, new_pan: (f64, f64)) {
+        if frame_idx >= self.layout_frames.len() {
+            return;
+        }
+        self.layout_frames[frame_idx].pan = new_pan;
+
+        let Some(monitor) = self.target_monitor() else {
+            return;
+        };
+        let (mw, mh) = (monitor.width, monitor.height);
+        let layout_mode = match self.config.layout.mode.as_str() {
+            "single" => LayoutMode::Fixed(1),
+            "split2" => LayoutMode::Fixed(2),
+            "split3" => LayoutMode::Fixed(3),
+            _ => {
+                let count = self.layout_frames.len().clamp(1, 3) as u8;
+                LayoutMode::Fixed(count)
+            }
+        };
+
+        let req = LayoutRequest {
+            monitor_px: (mw, mh),
+            mode: layout_mode,
+            max_scale: self.config.layout.max_scale,
+            border_px: self.config.layout.border_px,
+            frames: self.layout_frames.clone(),
+        };
+
+        let plan = plan_layout(&req, &[]);
+
+        if let (Some(composed), Some(base)) = (&mut self.active_composed, &self.active_base_layer) {
+            if let Some(frame_plan) = plan.frames.get(frame_idx) {
+                compose_single_frame_foreground(composed, frame_plan, base, &self.cached_images);
+            }
+        }
+
+        self.active_plan = Some(plan);
+    }
+
+    /// Preload and decode the current normal view image if missing, plus trigger prefetch and pruning.
+    pub fn ensure_current_image_loaded(&mut self) {
+        if let Some(item) = self.catalog.current_item() {
+            let img_id = ImageId(item.path.to_string_lossy().to_string());
+            if !self.cached_images.contains_key(&img_id)
+                && let Ok(dec) = self.decoder.decode_image(&item.path, Some(4096))
+            {
+                self.cached_images.insert(img_id, dec);
+            }
+            self.prefetch_adjacent_images();
+            self.prune_image_cache();
+        }
+    }
+
+    /// Parallel prefetch of adjacent images using Rayon worker threads
     pub fn prefetch_adjacent_images(&mut self) {
         if self.catalog.items.is_empty() {
             return;
@@ -387,16 +452,39 @@ impl AppState {
         let cur = self.catalog.current_index.unwrap_or(0);
         let indices = [(cur + n - 1) % n, (cur + 1) % n];
 
-        for idx in indices {
-            let item = &self.catalog.items[idx];
-            if item.failure_reason.is_none() {
-                let id = ImageId(item.path.to_string_lossy().to_string());
-                if !self.cached_images.contains_key(&id)
-                    && let Ok(dec) = self.decoder.decode_image(&item.path, Some(4096))
-                {
-                    self.cached_images.insert(id, dec);
+        let to_fetch: Vec<PathBuf> = indices
+            .iter()
+            .filter_map(|&idx| {
+                let item = &self.catalog.items[idx];
+                if item.failure_reason.is_none() {
+                    let id = ImageId(item.path.to_string_lossy().to_string());
+                    if !self.cached_images.contains_key(&id) {
+                        return Some(item.path.clone());
+                    }
                 }
-            }
+                None
+            })
+            .collect();
+
+        if to_fetch.is_empty() {
+            return;
+        }
+
+        let decoded_items: Vec<(ImageId, DecodedImage)> = to_fetch
+            .into_par_iter()
+            .filter_map(|path| {
+                if let Ok(decoder) = ImageDecoder::new()
+                    && let Ok(dec) = decoder.decode_image(&path, Some(4096))
+                {
+                    Some((ImageId(path.to_string_lossy().to_string()), dec))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (id, dec) in decoded_items {
+            self.cached_images.insert(id, dec);
         }
     }
 
@@ -481,6 +569,8 @@ impl AppState {
             self.catalog.next();
             if !self.has_pinned_frames() {
                 self.rebuild_layout(true, true);
+            } else {
+                self.ensure_current_image_loaded();
             }
         } else {
             // Composite view: change selected frame only (Spec 3.4)
@@ -538,6 +628,8 @@ impl AppState {
             self.catalog.prev();
             if !self.has_pinned_frames() {
                 self.rebuild_layout(true, true);
+            } else {
+                self.ensure_current_image_loaded();
             }
         } else {
             if let Some(frame) = self.layout_frames.get(self.selected_frame_idx)
@@ -592,6 +684,8 @@ impl AppState {
             self.catalog.first();
             if !self.has_pinned_frames() {
                 self.rebuild_layout(true, true);
+            } else {
+                self.ensure_current_image_loaded();
             }
         } else {
             if let Some(frame) = self.layout_frames.get(self.selected_frame_idx)
@@ -642,6 +736,8 @@ impl AppState {
             self.catalog.last();
             if !self.has_pinned_frames() {
                 self.rebuild_layout(true, true);
+            } else {
+                self.ensure_current_image_loaded();
             }
         } else {
             if let Some(frame) = self.layout_frames.get(self.selected_frame_idx)
@@ -708,6 +804,8 @@ impl AppState {
                 self.catalog.current_index = Some(idx);
                 if !self.has_pinned_frames() {
                     self.rebuild_layout(true, true);
+                } else {
+                    self.ensure_current_image_loaded();
                 }
                 if let Some(item) = self.catalog.current_item() {
                     self.set_osd(format!("ランダム: {}", item.filename), 2, false);
@@ -826,9 +924,8 @@ impl AppState {
 
     pub fn reset_pan(&mut self) {
         if self.selected_frame_idx < self.layout_frames.len() {
-            self.layout_frames[self.selected_frame_idx].pan = (0.5, 0.5);
             self.set_osd("パン位置を中央にリセットしました".into(), 2, false);
-            self.rebuild_layout(false, false);
+            self.update_pan_fast(self.selected_frame_idx, (0.5, 0.5));
         }
     }
 
@@ -993,8 +1090,7 @@ impl AppState {
             {
                 let slot = frame_plan.slot;
                 let (pan_x, pan_y) = calculate_smart_pan(dec, slot.width, slot.height, content.scale);
-                frame.pan = (pan_x, pan_y);
-                self.rebuild_layout(false, false);
+                self.update_pan_fast(self.selected_frame_idx, (pan_x, pan_y));
                 self.set_osd(
                     format!(
                         "スマートパン: 枠{}を被写体・顔に自動調整しました",

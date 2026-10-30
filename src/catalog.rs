@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogItem {
     pub path: PathBuf,
@@ -60,8 +62,8 @@ impl Catalog {
 
         let mut found_paths = collect_images_recursive(folder);
 
-        // Sort with natural sort order
-        found_paths.sort_by(|a, b| natural_cmp(a, b));
+        // Sort with natural sort order in parallel
+        found_paths.par_sort_by(|a, b| natural_cmp(a, b));
 
         // Rebuild items
         self.items = found_paths
@@ -417,29 +419,35 @@ pub fn natural_cmp(a: &Path, b: &Path) -> Ordering {
     let p_a = a.parent();
     let p_b = b.parent();
 
-    match (p_a, p_b) {
-        (Some(pa), Some(pb)) => {
-            let mut it_a = pa.components();
-            let mut it_b = pb.components();
-            loop {
-                match (it_a.next(), it_b.next()) {
-                    (Some(ca), Some(cb)) => {
-                        let sa = ca.as_os_str().to_string_lossy();
-                        let sb = cb.as_os_str().to_string_lossy();
-                        let ord = natural_str_cmp(&sa, &sb);
-                        if ord != Ordering::Equal {
-                            return ord;
+    // Fast path: if parent directory paths are identical, skip parent component traversals
+    if p_a != p_b {
+        match (p_a, p_b) {
+            (Some(pa), Some(pb)) => {
+                let mut it_a = pa.components();
+                let mut it_b = pb.components();
+                loop {
+                    match (it_a.next(), it_b.next()) {
+                        (Some(ca), Some(cb)) => {
+                            if ca == cb {
+                                continue;
+                            }
+                            let sa = ca.as_os_str().to_string_lossy();
+                            let sb = cb.as_os_str().to_string_lossy();
+                            let ord = natural_str_cmp(&sa, &sb);
+                            if ord != Ordering::Equal {
+                                return ord;
+                            }
                         }
+                        (Some(_), None) => return Ordering::Greater,
+                        (None, Some(_)) => return Ordering::Less,
+                        (None, None) => break,
                     }
-                    (Some(_), None) => return Ordering::Greater,
-                    (None, Some(_)) => return Ordering::Less,
-                    (None, None) => break,
                 }
             }
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (None, None) => {}
         }
-        (Some(_), None) => return Ordering::Greater,
-        (None, Some(_)) => return Ordering::Less,
-        (None, None) => {}
     }
 
     let name_a = a.file_name().and_then(|f| f.to_str()).unwrap_or("");
@@ -499,34 +507,51 @@ pub fn natural_str_cmp(a: &str, b: &str) -> Ordering {
             (false, false) => {
                 // Extract contiguous non-digits
                 let end_a = rem_a
-                    .char_indices()
-                    .find(|(_, c)| c.is_ascii_digit())
-                    .map(|(i, _)| i)
+                    .bytes()
+                    .position(|b| b.is_ascii_digit())
                     .unwrap_or(rem_a.len());
                 let end_b = rem_b
-                    .char_indices()
-                    .find(|(_, c)| c.is_ascii_digit())
-                    .map(|(i, _)| i)
+                    .bytes()
+                    .position(|b| b.is_ascii_digit())
                     .unwrap_or(rem_b.len());
                 let slice_a = &rem_a[..end_a];
                 let slice_b = &rem_b[..end_b];
                 rem_a = &rem_a[end_a..];
                 rem_b = &rem_b[end_b..];
 
-                let mut it_a = slice_a.chars().flat_map(|c| c.to_lowercase());
-                let mut it_b = slice_b.chars().flat_map(|c| c.to_lowercase());
-
-                loop {
-                    match (it_a.next(), it_b.next()) {
-                        (Some(ca), Some(cb)) => {
-                            let ord = ca.cmp(&cb);
-                            if ord != Ordering::Equal {
-                                return ord;
+                // Fast path: if both are pure ASCII, compare bytes case-insensitively without heap allocations
+                if slice_a.is_ascii() && slice_b.is_ascii() {
+                    let mut b_it_a = slice_a.bytes().map(|b| b.to_ascii_lowercase());
+                    let mut b_it_b = slice_b.bytes().map(|b| b.to_ascii_lowercase());
+                    loop {
+                        match (b_it_a.next(), b_it_b.next()) {
+                            (Some(ca), Some(cb)) => {
+                                let ord = ca.cmp(&cb);
+                                if ord != Ordering::Equal {
+                                    return ord;
+                                }
                             }
+                            (Some(_), None) => return Ordering::Greater,
+                            (None, Some(_)) => return Ordering::Less,
+                            (None, None) => break,
                         }
-                        (Some(_), None) => return Ordering::Greater,
-                        (None, Some(_)) => return Ordering::Less,
-                        (None, None) => break,
+                    }
+                } else {
+                    let mut it_a = slice_a.chars().flat_map(|c| c.to_lowercase());
+                    let mut it_b = slice_b.chars().flat_map(|c| c.to_lowercase());
+
+                    loop {
+                        match (it_a.next(), it_b.next()) {
+                            (Some(ca), Some(cb)) => {
+                                let ord = ca.cmp(&cb);
+                                if ord != Ordering::Equal {
+                                    return ord;
+                                }
+                            }
+                            (Some(_), None) => return Ordering::Greater,
+                            (None, Some(_)) => return Ordering::Less,
+                            (None, None) => break,
+                        }
                     }
                 }
             }

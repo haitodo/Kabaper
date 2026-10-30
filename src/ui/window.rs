@@ -352,8 +352,7 @@ unsafe extern "system" fn wnd_proc(
                             }
                         }
 
-                        frame.pan = (pan_x, pan_y);
-                        state.rebuild_layout(false, false);
+                        state.update_pan_fast(state.selected_frame_idx, (pan_x, pan_y));
                         let _ = InvalidateRect(Some(hwnd), None, false);
                     }
                 }
@@ -933,29 +932,30 @@ fn pan_by_keyboard(state: &mut AppState, key: VIRTUAL_KEY) {
         .map(|c| c.can_pan)
         .unwrap_or((false, false));
 
-    if let Some(frame) = state.layout_frames.get_mut(state.selected_frame_idx) {
+    if let Some(frame) = state.layout_frames.get(state.selected_frame_idx) {
+        let mut new_pan = frame.pan;
         let mut changed = false;
         match key {
             VK_LEFT if can_pan.0 => {
-                frame.pan.0 = (frame.pan.0 - 0.05).clamp(0.0, 1.0);
+                new_pan.0 = (new_pan.0 - 0.05).clamp(0.0, 1.0);
                 changed = true;
             }
             VK_RIGHT if can_pan.0 => {
-                frame.pan.0 = (frame.pan.0 + 0.05).clamp(0.0, 1.0);
+                new_pan.0 = (new_pan.0 + 0.05).clamp(0.0, 1.0);
                 changed = true;
             }
             VK_UP if can_pan.1 => {
-                frame.pan.1 = (frame.pan.1 - 0.05).clamp(0.0, 1.0);
+                new_pan.1 = (new_pan.1 - 0.05).clamp(0.0, 1.0);
                 changed = true;
             }
             VK_DOWN if can_pan.1 => {
-                frame.pan.1 = (frame.pan.1 + 0.05).clamp(0.0, 1.0);
+                new_pan.1 = (new_pan.1 + 0.05).clamp(0.0, 1.0);
                 changed = true;
             }
             _ => {}
         }
         if changed {
-            state.rebuild_layout(false, false);
+            state.update_pan_fast(state.selected_frame_idx, new_pan);
         }
     }
 }

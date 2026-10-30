@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use rayon::prelude::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::*;
@@ -18,12 +19,12 @@ pub struct ComposedBitmap {
 
 impl ComposedBitmap {
     pub fn new(width: u32, height: u32) -> Self {
-        let size = (width as usize) * (height as usize) * 4;
-        let mut pixels = vec![0u8; size];
-        // Initialize with opaque black (B=0, G=0, R=0, A=255)
-        for chunk in pixels.as_chunks_mut::<4>().0 {
+        let size = (width as usize) * (height as usize);
+        let mut pixels = vec![0u8; size * 4];
+        // Initialize with opaque black (B=0, G=0, R=0, A=255) in parallel
+        pixels.par_chunks_exact_mut(4).for_each(|chunk| {
             chunk[3] = 255;
-        }
+        });
         Self {
             width,
             height,
@@ -70,6 +71,16 @@ pub fn compose_layout_with_dim(
     images: &HashMap<ImageId, DecodedImage>,
     dim_ratio: f64,
 ) -> ComposedBitmap {
+    let mut target = compose_base_layer(plan, images, dim_ratio);
+    compose_foreground_layer(&mut target, plan, images);
+    target
+}
+
+pub fn compose_base_layer(
+    plan: &LayoutPlan,
+    images: &HashMap<ImageId, DecodedImage>,
+    dim_ratio: f64,
+) -> ComposedBitmap {
     let (mw, mh) = plan.monitor_px;
     let mut target = ComposedBitmap::new(mw, mh);
 
@@ -78,18 +89,71 @@ pub fn compose_layout_with_dim(
         if let Some(placed) = &frame.content
             && let Some(img) = images.get(&placed.id)
         {
-            // Check if margin exists for background blur
-            let has_margin = placed.blur_sigma > 0.0;
-            if has_margin {
+            if placed.blur_sigma > 0.0 {
                 render_background_blur(&mut target, slot, img, placed.blur_sigma, dim_ratio);
             }
-
-            // Render foreground image
-            render_foreground(&mut target, slot, img, placed);
         }
     }
 
     target
+}
+
+pub fn compose_foreground_layer(
+    target: &mut ComposedBitmap,
+    plan: &LayoutPlan,
+    images: &HashMap<ImageId, DecodedImage>,
+) {
+    for frame in &plan.frames {
+        let slot = frame.slot;
+        if let Some(placed) = &frame.content
+            && let Some(img) = images.get(&placed.id)
+        {
+            render_foreground(target, slot, img, placed);
+        }
+    }
+}
+
+pub fn compose_single_frame_foreground(
+    target: &mut ComposedBitmap,
+    frame: &crate::layout::FramePlan,
+    base: &ComposedBitmap,
+    images: &HashMap<ImageId, DecodedImage>,
+) {
+    let slot = frame.slot;
+    if slot.width == 0 || slot.height == 0 {
+        return;
+    }
+
+    let min_x = (slot.x.max(0) as u32).min(target.width);
+    let max_x = ((slot.x + slot.width as i32).max(0) as u32).min(target.width);
+    let min_y = (slot.y.max(0) as u32).min(target.height);
+    let max_y = ((slot.y + slot.height as i32).max(0) as u32).min(target.height);
+
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+
+    let row_stride = (target.width as usize) * 4;
+    let byte_start = (min_x as usize) * 4;
+    let byte_end = (max_x as usize) * 4;
+
+    // Restore background from base layer for this slot in parallel
+    let target_slice = &mut target.pixels[(min_y as usize) * row_stride..(max_y as usize) * row_stride];
+    let base_slice = &base.pixels[(min_y as usize) * row_stride..(max_y as usize) * row_stride];
+
+    target_slice
+        .par_chunks_exact_mut(row_stride)
+        .zip(base_slice.par_chunks_exact(row_stride))
+        .for_each(|(target_row, base_row)| {
+            target_row[byte_start..byte_end].copy_from_slice(&base_row[byte_start..byte_end]);
+        });
+
+    // Render foreground for this frame
+    if let Some(placed) = &frame.content
+        && let Some(img) = images.get(&placed.id)
+    {
+        render_foreground(target, slot, img, placed);
+    }
 }
 
 fn render_foreground(
@@ -158,45 +222,51 @@ fn render_foreground(
         });
     }
 
-    for y in min_y..max_y {
-        let v = ((y as i32 - fg_dest.y) as f64 + 0.5) / dh_f;
-        let sy = src_y_start + v * src_h;
-        let py = (sy - 0.5).clamp(0.0, (img.height - 1) as f64);
-        let y0 = py.floor() as i32;
-        let fy = (py - y0 as f64) as f32;
-        let wy = catmull_rom_weights(fy);
+    let target_w = target.width as usize;
+    let row_stride = target_w * 4;
+    let target_slice = &mut target.pixels[(min_y as usize) * row_stride..(max_y as usize) * row_stride];
 
-        let row0 = (y0 - 1).clamp(0, img_h - 1) as usize * stride_img;
-        let row1 = y0.clamp(0, img_h - 1) as usize * stride_img;
-        let row2 = (y0 + 1).clamp(0, img_h - 1) as usize * stride_img;
-        let row3 = (y0 + 2).clamp(0, img_h - 1) as usize * stride_img;
-        let rows = [row0, row1, row2, row3];
+    target_slice
+        .par_chunks_exact_mut(row_stride)
+        .enumerate()
+        .for_each(|(i, row_slice)| {
+            let y = min_y + i as u32;
+            let v = ((y as i32 - fg_dest.y) as f64 + 0.5) / dh_f;
+            let sy = src_y_start + v * src_h;
+            let py = (sy - 0.5).clamp(0.0, (img.height - 1) as f64);
+            let y0 = py.floor() as i32;
+            let fy = (py - y0 as f64) as f32;
+            let wy = catmull_rom_weights(fy);
 
-        let row_offset = (y as usize) * (target.width as usize) * 4;
-        let target_row = &mut target.pixels
-            [row_offset + (min_x as usize) * 4..row_offset + (max_x as usize) * 4];
+            let row0 = (y0 - 1).clamp(0, img_h - 1) as usize * stride_img;
+            let row1 = y0.clamp(0, img_h - 1) as usize * stride_img;
+            let row2 = (y0 + 1).clamp(0, img_h - 1) as usize * stride_img;
+            let row3 = (y0 + 2).clamp(0, img_h - 1) as usize * stride_img;
+            let rows = [row0, row1, row2, row3];
 
-        for (sample, out_pixel) in x_table.iter().zip(target_row.chunks_exact_mut(4)) {
-            let mut b_acc = 0.0f32;
-            let mut g_acc = 0.0f32;
-            let mut r_acc = 0.0f32;
+            let target_row = &mut row_slice[(min_x as usize) * 4..(max_x as usize) * 4];
 
-            for (&row, &wy_j) in rows.iter().zip(wy.iter()) {
-                for (&sx_off, &wx_i) in sample.sx_offsets.iter().zip(sample.weights.iter()) {
-                    let offset = row + sx_off;
-                    let weight = wy_j * wx_i;
-                    b_acc += img.pixels[offset] as f32 * weight;
-                    g_acc += img.pixels[offset + 1] as f32 * weight;
-                    r_acc += img.pixels[offset + 2] as f32 * weight;
+            for (sample, out_pixel) in x_table.iter().zip(target_row.chunks_exact_mut(4)) {
+                let mut b_acc = 0.0f32;
+                let mut g_acc = 0.0f32;
+                let mut r_acc = 0.0f32;
+
+                for (&row, &wy_j) in rows.iter().zip(wy.iter()) {
+                    for (&sx_off, &wx_i) in sample.sx_offsets.iter().zip(sample.weights.iter()) {
+                        let offset = row + sx_off;
+                        let weight = wy_j * wx_i;
+                        b_acc += img.pixels[offset] as f32 * weight;
+                        g_acc += img.pixels[offset + 1] as f32 * weight;
+                        r_acc += img.pixels[offset + 2] as f32 * weight;
+                    }
                 }
-            }
 
-            out_pixel[0] = b_acc.round().clamp(0.0, 255.0) as u8;
-            out_pixel[1] = g_acc.round().clamp(0.0, 255.0) as u8;
-            out_pixel[2] = r_acc.round().clamp(0.0, 255.0) as u8;
-            out_pixel[3] = 255;
-        }
-    }
+                out_pixel[0] = b_acc.round().clamp(0.0, 255.0) as u8;
+                out_pixel[1] = g_acc.round().clamp(0.0, 255.0) as u8;
+                out_pixel[2] = r_acc.round().clamp(0.0, 255.0) as u8;
+                out_pixel[3] = 255;
+            }
+        });
 }
 
 fn render_background_blur(
@@ -228,19 +298,21 @@ fn render_background_blur(
 
     let mut small_buf = vec![0u8; (small_w as usize) * (small_h as usize) * 3];
 
-    for sy in 0..small_h {
-        let v = (sy as f64 + 0.5) / sh;
-        let img_y = bg_y + v * bg_h;
-        for sx in 0..small_w {
-            let u = (sx as f64 + 0.5) / sw;
-            let img_x = bg_x + u * bg_w;
-            let (b, g, r) = sample_bilinear(img, img_x, img_y);
-            let idx = ((sy as usize) * (small_w as usize) + (sx as usize)) * 3;
-            small_buf[idx] = b;
-            small_buf[idx + 1] = g;
-            small_buf[idx + 2] = r;
-        }
-    }
+    small_buf
+        .par_chunks_exact_mut((small_w as usize) * 3)
+        .enumerate()
+        .for_each(|(sy, row)| {
+            let v = (sy as f64 + 0.5) / sh;
+            let img_y = bg_y + v * bg_h;
+            for (sx, pixel) in (0..small_w).zip(row.chunks_exact_mut(3)) {
+                let u = (sx as f64 + 0.5) / sw;
+                let img_x = bg_x + u * bg_w;
+                let (b, g, r) = sample_bilinear(img, img_x, img_y);
+                pixel[0] = b;
+                pixel[1] = g;
+                pixel[2] = r;
+            }
+        });
 
     // 2. Gaussian blur on small buffer (separable horizontal + vertical) with edge clamp
     let blurred = gaussian_blur_rgb(&small_buf, small_w, small_h, small_sigma);
@@ -251,32 +323,41 @@ fn render_background_blur(
     let min_y = (slot.y.max(0) as u32).min(target.height);
     let max_y = ((slot.y + slot.height as i32).max(0) as u32).min(target.height);
 
-    let sw_f = slot.width as f64;
-    let sh_f = slot.height as f64;
-    let dim_factor = (1.0 - dim_ratio).clamp(0.0, 1.0);
+    if min_x < max_x && min_y < max_y {
+        let sw_f = slot.width as f64;
+        let sh_f = slot.height as f64;
+        let dim_factor = (1.0 - dim_ratio).clamp(0.0, 1.0);
+        let target_w = target.width as usize;
+        let row_stride = target_w * 4;
 
-    for y in min_y..max_y {
-        let v = ((y as i32 - slot.y) as f64 + 0.5) / sh_f;
-        let by = v * (small_h as f64);
-        let row_offset = (y as usize) * (target.width as usize) * 4;
+        let target_slice = &mut target.pixels[(min_y as usize) * row_stride..(max_y as usize) * row_stride];
+        target_slice
+            .par_chunks_exact_mut(row_stride)
+            .enumerate()
+            .for_each(|(i, row_slice)| {
+                let y = min_y + i as u32;
+                let v = ((y as i32 - slot.y) as f64 + 0.5) / sh_f;
+                let by = v * (small_h as f64);
+                let target_subrow = &mut row_slice[(min_x as usize) * 4..(max_x as usize) * 4];
 
-        for x in min_x..max_x {
-            let u = ((x as i32 - slot.x) as f64 + 0.5) / sw_f;
-            let bx = u * (small_w as f64);
+                for (x_offset, out_pixel) in target_subrow.chunks_exact_mut(4).enumerate() {
+                    let x = min_x + x_offset as u32;
+                    let u = ((x as i32 - slot.x) as f64 + 0.5) / sw_f;
+                    let bx = u * (small_w as f64);
 
-            let (b, g, r) = sample_small_bilinear(&blurred, small_w, small_h, bx, by);
-            let p_off = row_offset + (x as usize) * 4;
-            if dim_ratio > 0.0 {
-                target.pixels[p_off] = (b as f64 * dim_factor).round() as u8;
-                target.pixels[p_off + 1] = (g as f64 * dim_factor).round() as u8;
-                target.pixels[p_off + 2] = (r as f64 * dim_factor).round() as u8;
-            } else {
-                target.pixels[p_off] = b;
-                target.pixels[p_off + 1] = g;
-                target.pixels[p_off + 2] = r;
-            }
-            target.pixels[p_off + 3] = 255;
-        }
+                    let (b, g, r) = sample_small_bilinear(&blurred, small_w, small_h, bx, by);
+                    if dim_ratio > 0.0 {
+                        out_pixel[0] = (b as f64 * dim_factor).round() as u8;
+                        out_pixel[1] = (g as f64 * dim_factor).round() as u8;
+                        out_pixel[2] = (r as f64 * dim_factor).round() as u8;
+                    } else {
+                        out_pixel[0] = b;
+                        out_pixel[1] = g;
+                        out_pixel[2] = r;
+                    }
+                    out_pixel[3] = 255;
+                }
+            });
     }
 }
 
@@ -302,140 +383,139 @@ fn gaussian_blur_rgb(src: &[u8], width: u32, height: u32, sigma: f64) -> Vec<u8>
 
     let w = width as i32;
     let h = height as i32;
+    let row_stride_3 = (width as usize) * 3;
 
     // Horizontal pass: partition into left clamped, middle unclamped, right clamped
     let mut tmp = vec![0f32; (width as usize) * (height as usize) * 3];
     let left_end = radius.min(w);
     let right_start = (w - radius).max(left_end);
 
-    for y in 0..h {
-        let row_in = (y as usize) * (width as usize) * 3;
-        let row_out = (y as usize) * (width as usize) * 3;
+    tmp.par_chunks_exact_mut(row_stride_3)
+        .enumerate()
+        .for_each(|(y_idx, row_out)| {
+            let row_in = y_idx * row_stride_3;
+            let src_row = &src[row_in..row_in + row_stride_3];
 
-        for x in 0..left_end {
-            let mut acc_b = 0.0f32;
-            let mut acc_g = 0.0f32;
-            let mut acc_r = 0.0f32;
-            for (k_idx, k) in (-radius..=radius).enumerate() {
-                let sx = (x + k).clamp(0, w - 1) as usize;
-                let src_idx = row_in + sx * 3;
-                let weight = kernel_f32[k_idx];
-                acc_b += src[src_idx] as f32 * weight;
-                acc_g += src[src_idx + 1] as f32 * weight;
-                acc_r += src[src_idx + 2] as f32 * weight;
+            for x in 0..left_end {
+                let mut acc_b = 0.0f32;
+                let mut acc_g = 0.0f32;
+                let mut acc_r = 0.0f32;
+                for (k_idx, k) in (-radius..=radius).enumerate() {
+                    let sx = (x + k).clamp(0, w - 1) as usize;
+                    let src_idx = sx * 3;
+                    let weight = kernel_f32[k_idx];
+                    acc_b += src_row[src_idx] as f32 * weight;
+                    acc_g += src_row[src_idx + 1] as f32 * weight;
+                    acc_r += src_row[src_idx + 2] as f32 * weight;
+                }
+                let out_idx = (x as usize) * 3;
+                row_out[out_idx] = acc_b;
+                row_out[out_idx + 1] = acc_g;
+                row_out[out_idx + 2] = acc_r;
             }
-            let out_idx = row_out + (x as usize) * 3;
-            tmp[out_idx] = acc_b;
-            tmp[out_idx + 1] = acc_g;
-            tmp[out_idx + 2] = acc_r;
-        }
 
-        for x in left_end..right_start {
-            let mut acc_b = 0.0f32;
-            let mut acc_g = 0.0f32;
-            let mut acc_r = 0.0f32;
-            for (k_idx, k) in (-radius..=radius).enumerate() {
-                let sx = (x + k) as usize;
-                let src_idx = row_in + sx * 3;
-                let weight = kernel_f32[k_idx];
-                acc_b += src[src_idx] as f32 * weight;
-                acc_g += src[src_idx + 1] as f32 * weight;
-                acc_r += src[src_idx + 2] as f32 * weight;
+            for x in left_end..right_start {
+                let mut acc_b = 0.0f32;
+                let mut acc_g = 0.0f32;
+                let mut acc_r = 0.0f32;
+                for (k_idx, k) in (-radius..=radius).enumerate() {
+                    let sx = (x + k) as usize;
+                    let src_idx = sx * 3;
+                    let weight = kernel_f32[k_idx];
+                    acc_b += src_row[src_idx] as f32 * weight;
+                    acc_g += src_row[src_idx + 1] as f32 * weight;
+                    acc_r += src_row[src_idx + 2] as f32 * weight;
+                }
+                let out_idx = (x as usize) * 3;
+                row_out[out_idx] = acc_b;
+                row_out[out_idx + 1] = acc_g;
+                row_out[out_idx + 2] = acc_r;
             }
-            let out_idx = row_out + (x as usize) * 3;
-            tmp[out_idx] = acc_b;
-            tmp[out_idx + 1] = acc_g;
-            tmp[out_idx + 2] = acc_r;
-        }
 
-        for x in right_start..w {
-            let mut acc_b = 0.0f32;
-            let mut acc_g = 0.0f32;
-            let mut acc_r = 0.0f32;
-            for (k_idx, k) in (-radius..=radius).enumerate() {
-                let sx = (x + k).clamp(0, w - 1) as usize;
-                let src_idx = row_in + sx * 3;
-                let weight = kernel_f32[k_idx];
-                acc_b += src[src_idx] as f32 * weight;
-                acc_g += src[src_idx + 1] as f32 * weight;
-                acc_r += src[src_idx + 2] as f32 * weight;
+            for x in right_start..w {
+                let mut acc_b = 0.0f32;
+                let mut acc_g = 0.0f32;
+                let mut acc_r = 0.0f32;
+                for (k_idx, k) in (-radius..=radius).enumerate() {
+                    let sx = (x + k).clamp(0, w - 1) as usize;
+                    let src_idx = sx * 3;
+                    let weight = kernel_f32[k_idx];
+                    acc_b += src_row[src_idx] as f32 * weight;
+                    acc_g += src_row[src_idx + 1] as f32 * weight;
+                    acc_r += src_row[src_idx + 2] as f32 * weight;
+                }
+                let out_idx = (x as usize) * 3;
+                row_out[out_idx] = acc_b;
+                row_out[out_idx + 1] = acc_g;
+                row_out[out_idx + 2] = acc_r;
             }
-            let out_idx = row_out + (x as usize) * 3;
-            tmp[out_idx] = acc_b;
-            tmp[out_idx + 1] = acc_g;
-            tmp[out_idx + 2] = acc_r;
-        }
-    }
+        });
 
-    // Vertical pass: partition into top clamped, middle unclamped, bottom clamped
+    // Vertical pass:
     let mut out = vec![0u8; (width as usize) * (height as usize) * 3];
     let top_end = radius.min(h);
     let bottom_start = (h - radius).max(top_end);
 
-    let row_stride = (width as usize) * 3;
-
-    for y in 0..top_end {
-        let row_out = (y as usize) * row_stride;
-        for x in 0..w {
-            let mut acc_b = 0.0f32;
-            let mut acc_g = 0.0f32;
-            let mut acc_r = 0.0f32;
-            for (k_idx, k) in (-radius..=radius).enumerate() {
-                let sy = (y + k).clamp(0, h - 1) as usize;
-                let src_idx = sy * row_stride + (x as usize) * 3;
-                let weight = kernel_f32[k_idx];
-                acc_b += tmp[src_idx] * weight;
-                acc_g += tmp[src_idx + 1] * weight;
-                acc_r += tmp[src_idx + 2] * weight;
+    out.par_chunks_exact_mut(row_stride_3)
+        .enumerate()
+        .for_each(|(y_idx, row_out)| {
+            let y = y_idx as i32;
+            if y < top_end {
+                for x in 0..w {
+                    let mut acc_b = 0.0f32;
+                    let mut acc_g = 0.0f32;
+                    let mut acc_r = 0.0f32;
+                    for (k_idx, k) in (-radius..=radius).enumerate() {
+                        let sy = (y + k).clamp(0, h - 1) as usize;
+                        let src_idx = sy * row_stride_3 + (x as usize) * 3;
+                        let weight = kernel_f32[k_idx];
+                        acc_b += tmp[src_idx] * weight;
+                        acc_g += tmp[src_idx + 1] * weight;
+                        acc_r += tmp[src_idx + 2] * weight;
+                    }
+                    let out_idx = (x as usize) * 3;
+                    row_out[out_idx] = acc_b.round().clamp(0.0, 255.0) as u8;
+                    row_out[out_idx + 1] = acc_g.round().clamp(0.0, 255.0) as u8;
+                    row_out[out_idx + 2] = acc_r.round().clamp(0.0, 255.0) as u8;
+                }
+            } else if y < bottom_start {
+                for x in 0..w {
+                    let mut acc_b = 0.0f32;
+                    let mut acc_g = 0.0f32;
+                    let mut acc_r = 0.0f32;
+                    for (k_idx, k) in (-radius..=radius).enumerate() {
+                        let sy = (y + k) as usize;
+                        let src_idx = sy * row_stride_3 + (x as usize) * 3;
+                        let weight = kernel_f32[k_idx];
+                        acc_b += tmp[src_idx] * weight;
+                        acc_g += tmp[src_idx + 1] * weight;
+                        acc_r += tmp[src_idx + 2] * weight;
+                    }
+                    let out_idx = (x as usize) * 3;
+                    row_out[out_idx] = acc_b.round().clamp(0.0, 255.0) as u8;
+                    row_out[out_idx + 1] = acc_g.round().clamp(0.0, 255.0) as u8;
+                    row_out[out_idx + 2] = acc_r.round().clamp(0.0, 255.0) as u8;
+                }
+            } else {
+                for x in 0..w {
+                    let mut acc_b = 0.0f32;
+                    let mut acc_g = 0.0f32;
+                    let mut acc_r = 0.0f32;
+                    for (k_idx, k) in (-radius..=radius).enumerate() {
+                        let sy = (y + k).clamp(0, h - 1) as usize;
+                        let src_idx = sy * row_stride_3 + (x as usize) * 3;
+                        let weight = kernel_f32[k_idx];
+                        acc_b += tmp[src_idx] * weight;
+                        acc_g += tmp[src_idx + 1] * weight;
+                        acc_r += tmp[src_idx + 2] * weight;
+                    }
+                    let out_idx = (x as usize) * 3;
+                    row_out[out_idx] = acc_b.round().clamp(0.0, 255.0) as u8;
+                    row_out[out_idx + 1] = acc_g.round().clamp(0.0, 255.0) as u8;
+                    row_out[out_idx + 2] = acc_r.round().clamp(0.0, 255.0) as u8;
+                }
             }
-            let out_idx = row_out + (x as usize) * 3;
-            out[out_idx] = acc_b.round().clamp(0.0, 255.0) as u8;
-            out[out_idx + 1] = acc_g.round().clamp(0.0, 255.0) as u8;
-            out[out_idx + 2] = acc_r.round().clamp(0.0, 255.0) as u8;
-        }
-    }
-
-    for y in top_end..bottom_start {
-        let row_out = (y as usize) * row_stride;
-        for x in 0..w {
-            let mut acc_b = 0.0f32;
-            let mut acc_g = 0.0f32;
-            let mut acc_r = 0.0f32;
-            for (k_idx, k) in (-radius..=radius).enumerate() {
-                let sy = (y + k) as usize;
-                let src_idx = sy * row_stride + (x as usize) * 3;
-                let weight = kernel_f32[k_idx];
-                acc_b += tmp[src_idx] * weight;
-                acc_g += tmp[src_idx + 1] * weight;
-                acc_r += tmp[src_idx + 2] * weight;
-            }
-            let out_idx = row_out + (x as usize) * 3;
-            out[out_idx] = acc_b.round().clamp(0.0, 255.0) as u8;
-            out[out_idx + 1] = acc_g.round().clamp(0.0, 255.0) as u8;
-            out[out_idx + 2] = acc_r.round().clamp(0.0, 255.0) as u8;
-        }
-    }
-
-    for y in bottom_start..h {
-        let row_out = (y as usize) * row_stride;
-        for x in 0..w {
-            let mut acc_b = 0.0f32;
-            let mut acc_g = 0.0f32;
-            let mut acc_r = 0.0f32;
-            for (k_idx, k) in (-radius..=radius).enumerate() {
-                let sy = (y + k).clamp(0, h - 1) as usize;
-                let src_idx = sy * row_stride + (x as usize) * 3;
-                let weight = kernel_f32[k_idx];
-                acc_b += tmp[src_idx] * weight;
-                acc_g += tmp[src_idx + 1] * weight;
-                acc_r += tmp[src_idx + 2] * weight;
-            }
-            let out_idx = row_out + (x as usize) * 3;
-            out[out_idx] = acc_b.round().clamp(0.0, 255.0) as u8;
-            out[out_idx + 1] = acc_g.round().clamp(0.0, 255.0) as u8;
-            out[out_idx + 2] = acc_r.round().clamp(0.0, 255.0) as u8;
-        }
-    }
+        });
 
     out
 }

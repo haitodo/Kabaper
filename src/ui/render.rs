@@ -339,8 +339,6 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                 {
                     state.cached_images.insert(img_id.clone(), dec);
                 }
-                state.prefetch_adjacent_images();
-                state.prune_image_cache();
 
                 if let Some(dec) = state.cached_images.get(&img_id) {
                     let fit_scale = (canvas_w as f64 / dec.width as f64)
