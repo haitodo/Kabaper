@@ -263,19 +263,17 @@ pub fn collect_images_recursive(root: &Path) -> Vec<PathBuf> {
 
             if file_type.is_dir() {
                 // Skip hidden folders (e.g. .git) and recycle bin
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with('.') || name.eq_ignore_ascii_case("$RECYCLE.BIN") {
-                        continue;
-                    }
+                if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && (name.starts_with('.') || name.eq_ignore_ascii_case("$RECYCLE.BIN"))
+                {
+                    continue;
                 }
                 let norm = normalize_path(&path);
                 if visited_dirs.insert(norm) {
                     dirs_to_visit.push(path);
                 }
-            } else if file_type.is_file() {
-                if is_supported_image(&path) {
-                    images.push(normalize_path(&path));
-                }
+            } else if file_type.is_file() && is_supported_image(&path) {
+                images.push(normalize_path(&path));
             }
         }
     }

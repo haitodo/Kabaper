@@ -763,3 +763,92 @@ fn test_acceptance_sta_file_dialog_creation_and_options() {
     .join()
     .unwrap();
 }
+
+#[test]
+fn test_acceptance_minimize_preserves_active_composed_and_releases_prefetch() {
+    let temp = std::env::temp_dir().join(format!("kabaper_test_min_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp);
+    let storage = Storage::init_with_dir(temp.clone()).unwrap();
+
+    let mut state = kabaper::ui::AppState::new(storage, AppConfig::default(), None).unwrap();
+
+    state.catalog.items = vec![
+        kabaper::catalog::CatalogItem {
+            path: PathBuf::from("img0.jpg"),
+            filename: "img0.jpg".into(),
+            is_excluded: false,
+            failure_reason: None,
+        },
+        kabaper::catalog::CatalogItem {
+            path: PathBuf::from("img1.jpg"),
+            filename: "img1.jpg".into(),
+            is_excluded: false,
+            failure_reason: None,
+        },
+        kabaper::catalog::CatalogItem {
+            path: PathBuf::from("img2.jpg"),
+            filename: "img2.jpg".into(),
+            is_excluded: false,
+            failure_reason: None,
+        },
+    ];
+    state.catalog.current_index = Some(1); // img1 is active
+
+    for i in 0..3 {
+        let id = ImageId(format!("img{}.jpg", i));
+        let dummy = DecodedImage {
+            id: id.clone(),
+            orig_size: (100, 100),
+            width: 100,
+            height: 100,
+            pixels: vec![0u8; 100 * 100 * 4],
+        };
+        state.cached_images.insert(id, dummy);
+    }
+    assert_eq!(state.cached_images.len(), 3);
+
+    // Set frame to img1
+    state.layout_frames = vec![FrameInput {
+        image: Some(ImageSpec {
+            id: ImageId("img1.jpg".into()),
+            size_px: (100, 100),
+        }),
+        pinned: false,
+        pan: (0.5, 0.5),
+    }];
+
+    // Simulate active_composed being set before minimize
+    state.active_composed = Some(kabaper::compose::ComposedBitmap::new(1920, 1080));
+
+    // When minimized: Spec 8.2 requires releasing prefetch cache, NOT destroying active composed image
+    state.release_prefetch_cache();
+
+    // Verify active_composed is STILL PRESENT (must not become None!)
+    assert!(
+        state.active_composed.is_some(),
+        "active_composed must NOT be destroyed on minimize"
+    );
+
+    // Verify prefetch cache (img0, img2) is evicted, but active display image (img1) is retained
+    assert_eq!(state.cached_images.len(), 1);
+    assert!(
+        state
+            .cached_images
+            .contains_key(&ImageId("img1.jpg".into())),
+        "Active displayed image must be retained"
+    );
+    assert!(
+        !state
+            .cached_images
+            .contains_key(&ImageId("img0.jpg".into())),
+        "Prefetch img0 must be released on minimize"
+    );
+    assert!(
+        !state
+            .cached_images
+            .contains_key(&ImageId("img2.jpg".into())),
+        "Prefetch img2 must be released on minimize"
+    );
+
+    let _ = fs::remove_dir_all(&temp);
+}

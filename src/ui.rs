@@ -446,6 +446,34 @@ impl AppState {
         self.cached_images.retain(|id, _| keep.contains(id));
     }
 
+    /// Releases prefetch cache (±1 adjacent images) when the window is minimized (Spec 8.2),
+    /// while retaining currently displayed images.
+    pub fn release_prefetch_cache(&mut self) {
+        let mut keep = HashSet::new();
+
+        // 1. Current normal view image
+        if let Some(item) = self.catalog.current_item() {
+            keep.insert(ImageId(item.path.to_string_lossy().to_string()));
+        }
+
+        // 2. Composite layout frames (all active frames currently displayed)
+        for frame in &self.layout_frames {
+            if let Some(img) = &frame.image {
+                keep.insert(img.id.clone());
+            }
+        }
+        if let Some(plan) = &self.active_plan {
+            for frame in &plan.frames {
+                if let Some(c) = &frame.content {
+                    keep.insert(c.id.clone());
+                }
+            }
+        }
+
+        // Evict any cached image not in keep (i.e. evict prefetch cache)
+        self.cached_images.retain(|id, _| keep.contains(id));
+    }
+
     pub fn next_image(&mut self) {
         if self.view_mode == ViewMode::Normal {
             self.catalog.next();
@@ -1799,8 +1827,8 @@ unsafe extern "system" fn wnd_proc(
             WM_SIZE => {
                 let size_type = wparam.0 as u32;
                 if size_type == SIZE_MINIMIZED {
-                    state.active_composed = None;
-                    state.prune_image_cache();
+                    // Spec 8.2: Release prefetch cache when minimized, while retaining displayed images
+                    state.release_prefetch_cache();
                 } else if !state.fullscreen
                     && (size_type == SIZE_MAXIMIZED || size_type == SIZE_RESTORED)
                 {
@@ -1818,6 +1846,9 @@ unsafe extern "system" fn wnd_proc(
                         state.config.window.height = (r.bottom - r.top).max(100) as u32;
                         state.mark_config_dirty();
                     }
+                    state.prefetch_adjacent_images();
+                    state.prune_image_cache();
+                    let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -2139,6 +2170,8 @@ pub enum ModernButtonStyle {
     Ghost,           // Low contrast, Text Secondary, 8px radius
 }
 
+/// # Safety
+/// Caller must pass a valid device context `hdc` and valid pointer `rect`.
 pub unsafe fn draw_round_rect_fill_stroke(
     hdc: HDC,
     rect: &RECT,
@@ -2170,6 +2203,9 @@ pub unsafe fn draw_round_rect_fill_stroke(
     }
 }
 
+/// # Safety
+/// Caller must pass a valid device context `hdc`.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn draw_modern_button(
     hdc: HDC,
     x: i32,
@@ -2471,6 +2507,10 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
 
         // Render Canvas
         if state.view_mode == ViewMode::Composite {
+            if state.active_composed.is_none() && !state.catalog.items.is_empty() {
+                state.rebuild_layout(false, false);
+            }
+
             if let Some(composed) = &state.active_composed {
                 let (mw, mh) = (composed.width as f64, composed.height as f64);
                 let fit_scale = (canvas_w as f64 / mw).min(canvas_h as f64 / mh);
