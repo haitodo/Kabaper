@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
@@ -1363,6 +1364,25 @@ pub fn run_gui(mut state: AppState, class_name: &str) -> Result<()> {
         state.normal_window_rect = rect;
         APP_STATE_PTR = &mut state as *mut AppState;
 
+        // Enable Dark Mode for title bar (Windows 10 1809+ / Windows 11)
+        let dark_mode = BOOL::from(true);
+        if DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_mode as *const _ as *const _,
+            std::mem::size_of::<BOOL>() as u32,
+        )
+        .is_err()
+        {
+            // Fallback for Windows 10 versions 1809 - 1909 (attribute 19)
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWINDOWATTRIBUTE(19),
+                &dark_mode as *const _ as *const _,
+                std::mem::size_of::<BOOL>() as u32,
+            );
+        }
+
         // Enable Drag & Drop (Spec 2.1)
         DragAcceptFiles(hwnd, true);
 
@@ -1549,17 +1569,23 @@ unsafe extern "system" fn wnd_proc(
                 state.last_interaction = Instant::now();
                 let x = (lparam.0 & 0xffff) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+                let dpi = get_window_dpi(hwnd);
 
                 // Handle modal dialog clicks
                 if state.modal_dialog != ModalDialog::None {
-                    handle_modal_click(state, hwnd, x, y);
+                    handle_modal_click(state, hwnd, x, y, dpi);
                     let _ = InvalidateRect(Some(hwnd), None, false);
                     return LRESULT(0);
                 }
 
                 // Handle operation bar clicks
-                if state.bar_visible && y < 45 {
-                    handle_bar_click(state, x, y);
+                let bar_h = if state.bar_visible {
+                    get_bar_height(dpi)
+                } else {
+                    0
+                };
+                if state.bar_visible && y < bar_h {
+                    handle_bar_click(state, hwnd, x, y);
                     let _ = InvalidateRect(Some(hwnd), None, false);
                     return LRESULT(0);
                 }
@@ -1568,7 +1594,7 @@ unsafe extern "system" fn wnd_proc(
                 if let Some((msg_str, _, _, true)) = &state.osd {
                     let mut cr = RECT::default();
                     let _ = GetClientRect(hwnd, &mut cr);
-                    let btn_r = osd_undo_button_rect(msg_str, cr.right);
+                    let btn_r = osd_undo_button_rect_dpi(msg_str, cr.right, dpi);
                     if x >= btn_r.left && x <= btn_r.right && y >= btn_r.top && y <= btn_r.bottom {
                         state.undo_wallpaper();
                         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -1584,8 +1610,7 @@ unsafe extern "system" fn wnd_proc(
                 if is_empty {
                     let mut cr = RECT::default();
                     let _ = GetClientRect(hwnd, &mut cr);
-                    let bar_h = if state.bar_visible { 45 } else { 0 };
-                    let btn_r = empty_state_folder_btn_rect(cr.right, cr.bottom, bar_h);
+                    let btn_r = empty_state_folder_btn_rect_dpi(cr.right, cr.bottom, bar_h, dpi);
                     if x >= btn_r.left && x <= btn_r.right && y >= btn_r.top && y <= btn_r.bottom {
                         state.open_folder_dialog();
                         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -1599,7 +1624,6 @@ unsafe extern "system" fn wnd_proc(
                 {
                     let mut cr = RECT::default();
                     let _ = GetClientRect(hwnd, &mut cr);
-                    let bar_h = if state.bar_visible { 45 } else { 0 };
                     let canvas_h = (cr.bottom - bar_h).max(1);
                     let canvas_w = cr.right.max(1);
 
@@ -1611,31 +1635,33 @@ unsafe extern "system" fn wnd_proc(
                     let oy = bar_h as f64 + (canvas_h as f64 - dh) / 2.0;
 
                     // Check frame overlay buttons on selected frame
-                    if let Some(sel_frame) = plan.frames.get(state.selected_frame_idx) {
+                    let clicked_btn = if let Some(sel_frame) = plan.frames.get(state.selected_frame_idx) {
                         let fx = (ox + sel_frame.slot.x as f64 * fit_scale).round() as i32;
                         let fy = (oy + sel_frame.slot.y as f64 * fit_scale).round() as i32;
                         let fh = (sel_frame.slot.height as f64 * fit_scale).round() as i32;
-                        let btn_y = fy + fh - 34;
 
-                        if y >= btn_y && y <= btn_y + 26 {
-                            if x >= fx + 8 && x <= fx + 58 {
-                                state.toggle_pin();
-                                let _ = InvalidateRect(Some(hwnd), None, false);
-                                return LRESULT(0);
-                            } else if x >= fx + 62 && x <= fx + 112 {
-                                state.swap_frames();
-                                let _ = InvalidateRect(Some(hwnd), None, false);
-                                return LRESULT(0);
-                            } else if x >= fx + 116 && x <= fx + 174 {
-                                state.random_image();
-                                let _ = InvalidateRect(Some(hwnd), None, false);
-                                return LRESULT(0);
-                            } else if x >= fx + 178 && x <= fx + 236 {
-                                state.toggle_exclude_current();
-                                let _ = InvalidateRect(Some(hwnd), None, false);
-                                return LRESULT(0);
+                        let overlay_buttons = get_frame_overlay_buttons(fx, fy, fh, dpi);
+                        let mut found = None;
+                        for (btn_id, r) in overlay_buttons {
+                            if x >= r.left && x <= r.right && y >= r.top && y <= r.bottom {
+                                found = Some(btn_id);
+                                break;
                             }
                         }
+                        found
+                    } else {
+                        None
+                    };
+
+                    if let Some(btn_id) = clicked_btn {
+                        match btn_id {
+                            FrameOverlayButtonId::Pin => state.toggle_pin(),
+                            FrameOverlayButtonId::Swap => state.swap_frames(),
+                            FrameOverlayButtonId::Random => state.random_image(),
+                            FrameOverlayButtonId::Exclude => state.toggle_exclude_current(),
+                        }
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        return LRESULT(0);
                     }
 
                     let rel_x = ((x as f64 - ox) / fit_scale) as i32;
@@ -1890,7 +1916,34 @@ unsafe extern "system" fn wnd_proc(
                 LRESULT(0)
             }
 
-            WM_DISPLAYCHANGE | WM_DPICHANGED => {
+            WM_DISPLAYCHANGE => {
+                state.monitors = enumerate_monitors();
+                if let Some(target_id) = &state.config.target.monitor_id {
+                    if let Some(idx) = state.monitors.iter().position(|m| &m.id == target_id) {
+                        state.target_monitor_idx = idx;
+                    } else {
+                        state.target_monitor_idx = 0;
+                    }
+                }
+                state.rebuild_layout(false, true);
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                LRESULT(0)
+            }
+
+            WM_DPICHANGED => {
+                if lparam.0 != 0 {
+                    let prc = lparam.0 as *const RECT;
+                    let r = *prc;
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
                 state.monitors = enumerate_monitors();
                 if let Some(target_id) = &state.config.target.monitor_id {
                     if let Some(idx) = state.monitors.iter().position(|m| &m.id == target_id) {
@@ -2065,33 +2118,159 @@ fn is_over_pan_capable_frame(state: &AppState, hwnd: HWND, x: i32, y: i32) -> bo
     }
 }
 
-fn handle_bar_click(state: &mut AppState, x: i32, _y: i32) {
-    match x {
-        10..=90 => state.open_folder_dialog(),
-        95..=160 => state.switch_view_mode(),
-        165..=240 => {
-            let next_num = if let Some(m) = state.target_monitor() {
-                (m.number % state.monitors.len()) + 1
-            } else {
-                1
-            };
-            state.select_monitor(next_num);
+pub fn get_window_dpi(hwnd: HWND) -> u32 {
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd);
+        if dpi == 0 {
+            96
+        } else {
+            dpi
         }
-        245..=315 => state.cycle_layout_mode(true),
-        320..=385 => state.adjust_max_scale(0.05),
-        390..=450 => state.apply_current_wallpaper(),
-        455..=520 => state.random_image(),
-        525..=600 => state.trigger_random_update(),
-        605..=675 => state.undo_wallpaper(),
-        680..=750 => state.export_png_dialog(),
-        755..=810 => {
-            state.modal_dialog = ModalDialog::Settings;
-        }
-        815..=885 => {
-            state.modal_dialog = ModalDialog::Shortcuts;
-        }
-        _ => {}
     }
+}
+
+#[inline]
+pub fn scale_by_dpi(value: i32, dpi: u32) -> i32 {
+    let effective_dpi = if dpi == 0 { 96 } else { dpi };
+    (value * effective_dpi as i32 + 48) / 96
+}
+
+pub fn get_bar_height(dpi: u32) -> i32 {
+    scale_by_dpi(45, dpi)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarButtonId {
+    Open,
+    ViewMode,
+    Monitor,
+    Split,
+    Scale,
+    Apply,
+    Random,
+    UpdateWallpaper,
+    Undo,
+    SavePng,
+    Settings,
+    Shortcuts,
+}
+
+pub fn get_operation_bar_buttons(dpi: u32) -> Vec<(BarButtonId, RECT)> {
+    let pad_x = scale_by_dpi(10, dpi);
+    let gap = scale_by_dpi(6, dpi);
+    let btn_y = scale_by_dpi(6, dpi);
+    let btn_h = scale_by_dpi(32, dpi);
+
+    let defs = [
+        (BarButtonId::Open, 76),
+        (BarButtonId::ViewMode, 68),
+        (BarButtonId::Monitor, 78),
+        (BarButtonId::Split, 88),
+        (BarButtonId::Scale, 82),
+        (BarButtonId::Apply, 68),
+        (BarButtonId::Random, 78),
+        (BarButtonId::UpdateWallpaper, 82),
+        (BarButtonId::Undo, 80),
+        (BarButtonId::SavePng, 82),
+        (BarButtonId::Settings, 64),
+        (BarButtonId::Shortcuts, 82),
+    ];
+
+    let mut current_x = pad_x;
+    let mut result = Vec::with_capacity(defs.len());
+    for (id, base_w) in defs {
+        let w = scale_by_dpi(base_w, dpi);
+        let rect = RECT {
+            left: current_x,
+            top: btn_y,
+            right: current_x + w,
+            bottom: btn_y + btn_h,
+        };
+        result.push((id, rect));
+        current_x += w + gap;
+    }
+    result
+}
+
+fn handle_bar_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
+    let dpi = get_window_dpi(hwnd);
+    let buttons = get_operation_bar_buttons(dpi);
+    for (id, r) in buttons {
+        if x >= r.left && x <= r.right && y >= r.top && y <= r.bottom {
+            match id {
+                BarButtonId::Open => state.open_folder_dialog(),
+                BarButtonId::ViewMode => state.switch_view_mode(),
+                BarButtonId::Monitor => {
+                    let next_num = if let Some(m) = state.target_monitor() {
+                        (m.number % state.monitors.len()) + 1
+                    } else {
+                        1
+                    };
+                    state.select_monitor(next_num);
+                }
+                BarButtonId::Split => state.cycle_layout_mode(true),
+                BarButtonId::Scale => state.adjust_max_scale(0.05),
+                BarButtonId::Apply => state.apply_current_wallpaper(),
+                BarButtonId::Random => state.random_image(),
+                BarButtonId::UpdateWallpaper => state.trigger_random_update(),
+                BarButtonId::Undo => state.undo_wallpaper(),
+                BarButtonId::SavePng => state.export_png_dialog(),
+                BarButtonId::Settings => {
+                    state.modal_dialog = ModalDialog::Settings;
+                }
+                BarButtonId::Shortcuts => {
+                    state.modal_dialog = ModalDialog::Shortcuts;
+                }
+            }
+            break;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameOverlayButtonId {
+    Pin,
+    Swap,
+    Random,
+    Exclude,
+}
+
+pub fn get_frame_overlay_buttons(
+    fx: i32,
+    fy: i32,
+    fh: i32,
+    dpi: u32,
+) -> [(FrameOverlayButtonId, RECT); 4] {
+    let btn_h = scale_by_dpi(28, dpi);
+    let bottom_margin = scale_by_dpi(36, dpi);
+    let btn_y = fy + fh - bottom_margin;
+    let gap = scale_by_dpi(6, dpi);
+    let start_x = fx + scale_by_dpi(8, dpi);
+
+    let defs = [
+        (FrameOverlayButtonId::Pin, 56),
+        (FrameOverlayButtonId::Swap, 64),
+        (FrameOverlayButtonId::Random, 72),
+        (FrameOverlayButtonId::Exclude, 76),
+    ];
+
+    let mut current_x = start_x;
+    let mut buttons = Vec::with_capacity(4);
+    for (id, base_w) in defs {
+        let w = scale_by_dpi(base_w, dpi);
+        buttons.push((
+            id,
+            RECT {
+                left: current_x,
+                top: btn_y,
+                right: current_x + w,
+                bottom: btn_y + btn_h,
+            },
+        ));
+        current_x += w + gap;
+    }
+
+    [buttons[0], buttons[1], buttons[2], buttons[3]]
 }
 
 fn sync_schedule_and_notify(state: &mut AppState) {
@@ -2133,11 +2312,17 @@ pub fn osd_text_display_width(text: &str) -> i32 {
 }
 
 pub fn osd_notification_rect(text: &str, win_w: i32, has_undo: bool) -> RECT {
-    let text_w = osd_text_display_width(text);
-    let osd_w = (text_w + if has_undo { 160 } else { 50 }).max(if has_undo { 360 } else { 200 });
-    let osd_h = 40;
+    osd_notification_rect_dpi(text, win_w, has_undo, 96)
+}
+
+pub fn osd_notification_rect_dpi(text: &str, win_w: i32, has_undo: bool, dpi: u32) -> RECT {
+    let text_w = scale_by_dpi(osd_text_display_width(text), dpi);
+    let extra = scale_by_dpi(if has_undo { 160 } else { 50 }, dpi);
+    let min_w = scale_by_dpi(if has_undo { 360 } else { 200 }, dpi);
+    let osd_w = (text_w + extra).max(min_w);
+    let osd_h = scale_by_dpi(40, dpi);
     let ox = (win_w - osd_w) / 2;
-    let oy = 60;
+    let oy = scale_by_dpi(60, dpi);
     RECT {
         left: ox,
         top: oy,
@@ -2147,20 +2332,32 @@ pub fn osd_notification_rect(text: &str, win_w: i32, has_undo: bool) -> RECT {
 }
 
 pub fn osd_undo_button_rect(text: &str, win_w: i32) -> RECT {
-    let r = osd_notification_rect(text, win_w, true);
+    osd_undo_button_rect_dpi(text, win_w, 96)
+}
+
+pub fn osd_undo_button_rect_dpi(text: &str, win_w: i32, dpi: u32) -> RECT {
+    let r = osd_notification_rect_dpi(text, win_w, true, dpi);
+    let offset_right = scale_by_dpi(110, dpi);
+    let btn_w = scale_by_dpi(95, dpi);
+    let offset_top = scale_by_dpi(6, dpi);
+    let btn_h = scale_by_dpi(28, dpi);
     RECT {
-        left: r.right - 110,
-        top: r.top + 6,
-        right: r.right - 110 + 95,
-        bottom: r.top + 6 + 28,
+        left: r.right - offset_right,
+        top: r.top + offset_top,
+        right: r.right - offset_right + btn_w,
+        bottom: r.top + offset_top + btn_h,
     }
 }
 
 pub fn empty_state_folder_btn_rect(win_w: i32, win_h: i32, bar_h: i32) -> RECT {
-    let btn_w = 220;
-    let btn_h = 36;
+    empty_state_folder_btn_rect_dpi(win_w, win_h, bar_h, 96)
+}
+
+pub fn empty_state_folder_btn_rect_dpi(win_w: i32, win_h: i32, bar_h: i32, dpi: u32) -> RECT {
+    let btn_w = scale_by_dpi(220, dpi);
+    let btn_h = scale_by_dpi(36, dpi);
     let bx = (win_w - btn_w) / 2;
-    let by = bar_h + (win_h - bar_h) / 2 + 25;
+    let by = bar_h + (win_h - bar_h) / 2 + scale_by_dpi(25, dpi);
     RECT {
         left: bx,
         top: by,
@@ -2362,14 +2559,21 @@ pub unsafe fn draw_modern_button(
     }
 }
 
-unsafe fn draw_empty_state_guidance(hdc: HDC, win_w: i32, win_h: i32, bar_h: i32, msg: &str) {
+unsafe fn draw_empty_state_guidance(
+    hdc: HDC,
+    win_w: i32,
+    win_h: i32,
+    bar_h: i32,
+    msg: &str,
+    dpi: u32,
+) {
     unsafe {
-        let btn_r = empty_state_folder_btn_rect(win_w, win_h, bar_h);
+        let btn_r = empty_state_folder_btn_rect_dpi(win_w, win_h, bar_h, dpi);
         let mut tr = RECT {
-            left: 20,
-            top: bar_h + (win_h - bar_h) / 2 - 50,
-            right: win_w - 20,
-            bottom: btn_r.top - 14,
+            left: scale_by_dpi(20, dpi),
+            top: bar_h + (win_h - bar_h) / 2 - scale_by_dpi(50, dpi),
+            right: win_w - scale_by_dpi(20, dpi),
+            bottom: btn_r.top - scale_by_dpi(14, dpi),
         };
         let _ = SetTextColor(hdc, M3_TEXT_SECONDARY);
         let _ = SetBkMode(hdc, TRANSPARENT);
@@ -2383,12 +2587,12 @@ unsafe fn draw_empty_state_guidance(hdc: HDC, win_w: i32, win_h: i32, bar_h: i32
             btn_r.bottom - btn_r.top,
             "フォルダを選択",
             ModernButtonStyle::Primary,
-            8,
+            scale_by_dpi(8, dpi),
         );
     }
 }
 
-fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
+fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32, dpi: u32) {
     unsafe {
         let mut cr = RECT::default();
         let _ = GetClientRect(hwnd, &mut cr);
@@ -2397,59 +2601,87 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
 
         match state.modal_dialog {
             ModalDialog::Settings => {
-                let box_w = 520;
-                let box_h = 430;
+                let box_w = scale_by_dpi(520, dpi);
+                let box_h = scale_by_dpi(430, dpi);
                 let bx = (win_w - box_w) / 2;
                 let by = (win_h - box_h) / 2;
 
-                // Close button: bx + 200, by + 375, 120, 34
-                if x >= bx + 200 && x <= bx + 320 && y >= by + 375 && y <= by + 409 {
+                // Close button
+                let close_w = scale_by_dpi(120, dpi);
+                let close_h = scale_by_dpi(34, dpi);
+                let close_x = bx + (box_w - close_w) / 2;
+                let close_y = by + scale_by_dpi(375, dpi);
+                if x >= close_x && x <= close_x + close_w && y >= close_y && y <= close_y + close_h {
                     state.modal_dialog = ModalDialog::None;
                     return;
                 }
 
-                // Row 1: Max Scale M [-] [+] (by + 60)
-                if y >= by + 60 && y <= by + 88 {
-                    if x >= bx + 160 && x <= bx + 200 {
+                // Row 1: Max Scale M [-] [+]
+                let row1_y = by + scale_by_dpi(60, dpi);
+                let btn_h28 = scale_by_dpi(28, dpi);
+                if y >= row1_y && y <= row1_y + btn_h28 {
+                    let minus_x = bx + scale_by_dpi(160, dpi);
+                    let minus_w = scale_by_dpi(40, dpi);
+                    let plus_x = bx + scale_by_dpi(280, dpi);
+                    let plus_w = scale_by_dpi(40, dpi);
+                    if x >= minus_x && x <= minus_x + minus_w {
                         state.adjust_max_scale(-0.05);
-                    } else if x >= bx + 280 && x <= bx + 320 {
+                    } else if x >= plus_x && x <= plus_x + plus_w {
                         state.adjust_max_scale(0.05);
                     }
                 }
 
-                // Row 2: Border px [-] [+] (by + 105)
-                if y >= by + 105 && y <= by + 133 {
-                    if x >= bx + 160 && x <= bx + 200 {
+                // Row 2: Border px [-] [+]
+                let row2_y = by + scale_by_dpi(105, dpi);
+                if y >= row2_y && y <= row2_y + btn_h28 {
+                    let minus_x = bx + scale_by_dpi(160, dpi);
+                    let minus_w = scale_by_dpi(40, dpi);
+                    let plus_x = bx + scale_by_dpi(280, dpi);
+                    let plus_w = scale_by_dpi(40, dpi);
+                    if x >= minus_x && x <= minus_x + minus_w {
                         state.config.layout.border_px =
                             state.config.layout.border_px.saturating_sub(1);
                         state.mark_config_dirty();
                         state.rebuild_layout(false, true);
-                    } else if x >= bx + 280 && x <= bx + 320 {
+                    } else if x >= plus_x && x <= plus_x + plus_w {
                         state.config.layout.border_px = (state.config.layout.border_px + 1).min(8);
                         state.mark_config_dirty();
                         state.rebuild_layout(false, true);
                     }
                 }
 
-                // Row 3: Random mode (by + 150)
-                if y >= by + 150 && y <= by + 178 {
-                    if x >= bx + 160 && x <= bx + 220 {
+                // Row 3: Random mode
+                let row3_y = by + scale_by_dpi(150, dpi);
+                if y >= row3_y && y <= row3_y + btn_h28 {
+                    let m_auto_x = bx + scale_by_dpi(160, dpi);
+                    let m_auto_w = scale_by_dpi(60, dpi);
+                    let m_single_x = bx + scale_by_dpi(225, dpi);
+                    let m_single_w = scale_by_dpi(50, dpi);
+                    let m_split2_x = bx + scale_by_dpi(280, dpi);
+                    let m_split2_w = scale_by_dpi(50, dpi);
+                    let m_split3_x = bx + scale_by_dpi(335, dpi);
+                    let m_split3_w = scale_by_dpi(50, dpi);
+
+                    if x >= m_auto_x && x <= m_auto_x + m_auto_w {
                         state.config.random.mode = "auto".into();
                         state.mark_config_dirty();
-                    } else if x >= bx + 225 && x <= bx + 275 {
+                    } else if x >= m_single_x && x <= m_single_x + m_single_w {
                         state.config.random.mode = "single".into();
                         state.mark_config_dirty();
-                    } else if x >= bx + 280 && x <= bx + 330 {
+                    } else if x >= m_split2_x && x <= m_split2_x + m_split2_w {
                         state.config.random.mode = "split2".into();
                         state.mark_config_dirty();
-                    } else if x >= bx + 335 && x <= bx + 385 {
+                    } else if x >= m_split3_x && x <= m_split3_x + m_split3_w {
                         state.config.random.mode = "split3".into();
                         state.mark_config_dirty();
                     }
                 }
 
-                // Row 4: Schedule enabled (by + 195)
-                if y >= by + 195 && y <= by + 223 && x >= bx + 160 && x <= bx + 260 {
+                // Row 4: Schedule enabled
+                let row4_y = by + scale_by_dpi(195, dpi);
+                let en_x = bx + scale_by_dpi(160, dpi);
+                let en_w = scale_by_dpi(100, dpi);
+                if y >= row4_y && y <= row4_y + btn_h28 && x >= en_x && x <= en_x + en_w {
                     state.config.schedule.enabled = !state.config.schedule.enabled;
                     if state.config.schedule.enabled
                         && !state.config.schedule.on_logon
@@ -2461,8 +2693,11 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
                     sync_schedule_and_notify(state);
                 }
 
-                // Row 5: Schedule logon (by + 240)
-                if y >= by + 240 && y <= by + 268 && x >= bx + 160 && x <= bx + 260 {
+                // Row 5: Schedule logon
+                let row5_y = by + scale_by_dpi(240, dpi);
+                let en_x = bx + scale_by_dpi(160, dpi);
+                let en_w = scale_by_dpi(100, dpi);
+                if y >= row5_y && y <= row5_y + btn_h28 && x >= en_x && x <= en_x + en_w {
                     let next = !state.config.schedule.on_logon;
                     if !next
                         && state.config.schedule.interval_minutes == 0
@@ -2480,8 +2715,11 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
                     }
                 }
 
-                // Row 6: Schedule interval cycle (by + 285)
-                if y >= by + 285 && y <= by + 313 && x >= bx + 160 && x <= bx + 320 {
+                // Row 6: Schedule interval cycle
+                let row6_y = by + scale_by_dpi(285, dpi);
+                let int_x = bx + scale_by_dpi(160, dpi);
+                let int_w = scale_by_dpi(200, dpi);
+                if y >= row6_y && y <= row6_y + btn_h28 && x >= int_x && x <= int_x + int_w {
                     let intervals = [0, 15, 30, 60, 180, 360, 720, 1440];
                     let cur = state.config.schedule.interval_minutes;
                     let idx = intervals.iter().position(|&i| i == cur).unwrap_or(3);
@@ -2498,13 +2736,17 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
                 }
             }
             ModalDialog::ExcludeList => {
-                let box_w = 540;
-                let box_h = 440;
+                let box_w = scale_by_dpi(540, dpi);
+                let box_h = scale_by_dpi(440, dpi);
                 let bx = (win_w - box_w) / 2;
                 let by = (win_h - box_h) / 2;
 
-                // Close button: bx + 210, by + 380, 120, 34
-                if x >= bx + 210 && x <= bx + 330 && y >= by + 380 && y <= by + 414 {
+                // Close button
+                let close_w = scale_by_dpi(120, dpi);
+                let close_h = scale_by_dpi(34, dpi);
+                let close_x = bx + (box_w - close_w) / 2;
+                let close_y = by + scale_by_dpi(380, dpi);
+                if x >= close_x && x <= close_x + close_w && y >= close_y && y <= close_y + close_h {
                     state.modal_dialog = ModalDialog::None;
                     return;
                 }
@@ -2518,9 +2760,12 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
                     .map(|it| it.path.clone())
                     .collect();
 
+                let rel_btn_x = bx + scale_by_dpi(440, dpi);
+                let rel_btn_w = scale_by_dpi(60, dpi);
+                let rel_btn_h = scale_by_dpi(26, dpi);
                 for (i, p) in excluded_in_folder.iter().take(5).enumerate() {
-                    let btn_y = by + 60 + (i as i32) * 36;
-                    if y >= btn_y && y <= btn_y + 26 && x >= bx + 440 && x <= bx + 500 {
+                    let btn_y = by + scale_by_dpi(60, dpi) + (i as i32) * scale_by_dpi(36, dpi);
+                    if y >= btn_y && y <= btn_y + rel_btn_h && x >= rel_btn_x && x <= rel_btn_x + rel_btn_w {
                         state.catalog.toggle_exclude(p);
                         state.sync_catalog_excludes();
                         state.rebuild_layout(false, false);
@@ -2528,8 +2773,12 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
                     }
                 }
 
-                // Clear current folder excludes: bx + 30, by + 250, 220, 30
-                if y >= by + 250 && y <= by + 280 && x >= bx + 30 && x <= bx + 250 {
+                // Clear current folder excludes
+                let clr1_x = bx + scale_by_dpi(30, dpi);
+                let clr1_y = by + scale_by_dpi(250, dpi);
+                let clr1_w = scale_by_dpi(220, dpi);
+                let clr1_h = scale_by_dpi(30, dpi);
+                if y >= clr1_y && y <= clr1_y + clr1_h && x >= clr1_x && x <= clr1_x + clr1_w {
                     for p in &excluded_in_folder {
                         state.catalog.excluded_paths.remove(p);
                     }
@@ -2543,18 +2792,26 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
                     state.set_osd("現在のフォルダの除外を一括解除しました".into(), 2, false);
                 }
 
-                // Clean nonexistent paths: bx + 30, by + 325, 200, 30
-                if y >= by + 325 && y <= by + 355 && x >= bx + 30 && x <= bx + 230 {
+                // Clean nonexistent paths
+                let clr2_x = bx + scale_by_dpi(30, dpi);
+                let clr2_y = by + scale_by_dpi(325, dpi);
+                let clr2_w = scale_by_dpi(200, dpi);
+                let clr2_h = scale_by_dpi(30, dpi);
+                if y >= clr2_y && y <= clr2_y + clr2_h && x >= clr2_x && x <= clr2_x + clr2_w {
                     state.catalog.excluded_paths.retain(|p| p.exists());
                     state.sync_catalog_excludes();
                     state.set_osd("存在しないパスの除外設定を整理しました".into(), 2, false);
                 }
 
-                // Clear other folder excludes: bx + 245, by + 325, 200, 30
-                if y >= by + 325
-                    && y <= by + 355
-                    && x >= bx + 245
-                    && x <= bx + 445
+                // Clear other folder excludes
+                let clr3_x = bx + scale_by_dpi(245, dpi);
+                let clr3_y = by + scale_by_dpi(325, dpi);
+                let clr3_w = scale_by_dpi(200, dpi);
+                let clr3_h = scale_by_dpi(30, dpi);
+                if y >= clr3_y
+                    && y <= clr3_y + clr3_h
+                    && x >= clr3_x
+                    && x <= clr3_x + clr3_w
                     && let Some(folder) = &state.catalog.folder
                 {
                     let f_norm = normalize_path(folder);
@@ -2567,12 +2824,17 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
                 }
             }
             ModalDialog::Shortcuts => {
-                let box_w = 480;
-                let box_h = 540;
+                let box_w = scale_by_dpi(480, dpi);
+                let box_h = scale_by_dpi(540, dpi);
                 let bx = (win_w - box_w) / 2;
                 let by = (win_h - box_h) / 2;
 
-                if x >= bx + 180 && x <= bx + 300 && y >= by + 480 && y <= by + 525 {
+                let close_w = scale_by_dpi(120, dpi);
+                let close_h = scale_by_dpi(34, dpi);
+                let close_x = bx + (box_w - close_w) / 2;
+                let close_y = by + scale_by_dpi(485, dpi);
+
+                if x >= close_x && x <= close_x + close_w && y >= close_y && y <= close_y + close_h {
                     state.modal_dialog = ModalDialog::None;
                 }
             }
@@ -2587,6 +2849,7 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
         let _ = GetClientRect(hwnd, &mut cr);
         let win_w = cr.right.max(1);
         let win_h = cr.bottom.max(1);
+        let dpi = get_window_dpi(hwnd);
 
         // Double-buffered memory DC
         let mem_dc = CreateCompatibleDC(Some(hdc));
@@ -2602,7 +2865,11 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
         let _ = FillRect(mem_dc, &cr, bg_brush);
         let _ = DeleteObject(bg_brush.into());
 
-        let bar_h = if state.bar_visible { 45 } else { 0 };
+        let bar_h = if state.bar_visible {
+            get_bar_height(dpi)
+        } else {
+            0
+        };
         let canvas_h = (win_h - bar_h).max(1);
         let canvas_w = win_w;
 
@@ -2665,52 +2932,75 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                             let _ = DeleteObject(select_brush.into());
 
                             // Spec 4.1: Frame action buttons (ピン, 枠交換, ランダム, 除外)
-                            let btn_y = fy + fh - 34;
-                            let pin_txt = if frame.pinned { "解除" } else { "ピン" };
-                            draw_overlay_btn(mem_dc, fx + 8, btn_y, 50, 26, pin_txt);
-                            draw_overlay_btn(mem_dc, fx + 62, btn_y, 50, 26, "枠交換");
-                            draw_overlay_btn(mem_dc, fx + 116, btn_y, 58, 26, "ランダム");
-                            let ex_txt =
-                                if let Some(c) = &frame.content {
-                                    if state.catalog.items.iter().any(|it| {
-                                        it.path.to_string_lossy() == c.id.0 && it.is_excluded
-                                    }) {
-                                        "除外解除"
-                                    } else {
-                                        "除外"
+                            let overlay_buttons = get_frame_overlay_buttons(fx, fy, fh, dpi);
+                            for (btn_id, r) in overlay_buttons {
+                                let w = r.right - r.left;
+                                let h = r.bottom - r.top;
+                                match btn_id {
+                                    FrameOverlayButtonId::Pin => {
+                                        let pin_txt = if frame.pinned { "解除" } else { "ピン" };
+                                        draw_overlay_btn(mem_dc, r.left, r.top, w, h, pin_txt);
                                     }
-                                } else {
-                                    "除外"
-                                };
-                            draw_overlay_btn(mem_dc, fx + 178, btn_y, 58, 26, ex_txt);
+                                    FrameOverlayButtonId::Swap => {
+                                        draw_overlay_btn(mem_dc, r.left, r.top, w, h, "枠交換");
+                                    }
+                                    FrameOverlayButtonId::Random => {
+                                        draw_overlay_btn(mem_dc, r.left, r.top, w, h, "ランダム");
+                                    }
+                                    FrameOverlayButtonId::Exclude => {
+                                        let ex_txt = if let Some(c) = &frame.content {
+                                            if state.catalog.items.iter().any(|it| {
+                                                it.path.to_string_lossy() == c.id.0 && it.is_excluded
+                                            }) {
+                                                "除外解除"
+                                            } else {
+                                                "除外"
+                                            }
+                                        } else {
+                                            "除外"
+                                        };
+                                        draw_overlay_btn(mem_dc, r.left, r.top, w, h, ex_txt);
+                                    }
+                                }
+                            }
                         }
 
-                        let mut badge_y = fy + 8;
+                        let mut badge_y = fy + scale_by_dpi(8, dpi);
+                        let badge_step = scale_by_dpi(28, dpi);
                         if frame.pinned {
-                            draw_badge(mem_dc, fx + 8, badge_y, "ピン留め", COLORREF(0x000088FF));
-                            badge_y += 24;
+                            draw_badge(
+                                mem_dc,
+                                fx + scale_by_dpi(8, dpi),
+                                badge_y,
+                                "ピン留め",
+                                COLORREF(0x000088FF),
+                                dpi,
+                            );
+                            badge_y += badge_step;
                         }
                         if let Some(c) = &frame.content {
                             match c.scale_limited {
                                 ScaleLimit::MaxScale => {
                                     draw_badge(
                                         mem_dc,
-                                        fx + 8,
+                                        fx + scale_by_dpi(8, dpi),
                                         badge_y,
                                         "倍率上限",
                                         COLORREF(0x0000A5FF),
+                                        dpi,
                                     );
-                                    badge_y += 24;
+                                    badge_y += badge_step;
                                 }
                                 ScaleLimit::CropLimit => {
                                     draw_badge(
                                         mem_dc,
-                                        fx + 8,
+                                        fx + scale_by_dpi(8, dpi),
                                         badge_y,
                                         "切抜上限",
                                         COLORREF(0x007820D9),
+                                        dpi,
                                     );
-                                    badge_y += 24;
+                                    badge_y += badge_step;
                                 }
                                 ScaleLimit::None => {}
                             }
@@ -2721,10 +3011,24 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                                 .find(|it| it.path.to_string_lossy() == c.id.0)
                                 && spec.is_excluded
                             {
-                                draw_badge(mem_dc, fx + 8, badge_y, "除外中", COLORREF(0x003333FF));
+                                draw_badge(
+                                    mem_dc,
+                                    fx + scale_by_dpi(8, dpi),
+                                    badge_y,
+                                    "除外中",
+                                    COLORREF(0x003333FF),
+                                    dpi,
+                                );
                             }
                         } else {
-                            draw_badge(mem_dc, fx + 8, badge_y, "空き枠", COLORREF(0x00666666));
+                            draw_badge(
+                                mem_dc,
+                                fx + scale_by_dpi(8, dpi),
+                                badge_y,
+                                "空き枠",
+                                COLORREF(0x00666666),
+                                dpi,
+                            );
                         }
                     }
                 }
@@ -2734,7 +3038,7 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                 } else {
                     "有効な候補画像がありません\n除外を解除するか（Delキー）、別のフォルダを選択してください"
                 };
-                draw_empty_state_guidance(mem_dc, win_w, win_h, bar_h, msg);
+                draw_empty_state_guidance(mem_dc, win_w, win_h, bar_h, msg, dpi);
             }
         } else {
             // Normal view
@@ -2788,35 +3092,35 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                 } else {
                     "有効な画像がありません\n別のフォルダを選択してください"
                 };
-                draw_empty_state_guidance(mem_dc, win_w, win_h, bar_h, msg);
+                draw_empty_state_guidance(mem_dc, win_w, win_h, bar_h, msg, dpi);
             }
         }
 
         // Render Operation Bar
         if state.bar_visible {
-            draw_operation_bar(state, mem_dc, win_w);
+            draw_operation_bar(state, mem_dc, win_w, dpi);
         }
 
         // Render Info Display
         if state.show_info {
-            draw_info_overlay(state, mem_dc, win_h);
+            draw_info_overlay(state, mem_dc, win_h, dpi);
         }
 
         // Render OSD
         if let Some((msg_str, _, _, has_undo)) = &state.osd {
-            draw_osd_notification(mem_dc, msg_str, win_w, *has_undo);
+            draw_osd_notification(mem_dc, msg_str, win_w, *has_undo, dpi);
         }
 
         // Render Error Banner
         if !state.error_banner.is_empty() {
-            draw_error_banner(mem_dc, &state.error_banner, win_w);
+            draw_error_banner(mem_dc, &state.error_banner, win_w, dpi);
         }
 
         // Render Modal Overlays
         match state.modal_dialog {
-            ModalDialog::Settings => draw_settings_modal(mem_dc, state, win_w, win_h),
-            ModalDialog::ExcludeList => draw_exclude_list_modal(mem_dc, state, win_w, win_h),
-            ModalDialog::Shortcuts => draw_shortcuts_modal(mem_dc, win_w, win_h),
+            ModalDialog::Settings => draw_settings_modal(mem_dc, state, win_w, win_h, dpi),
+            ModalDialog::ExcludeList => draw_exclude_list_modal(mem_dc, state, win_w, win_h, dpi),
+            ModalDialog::Shortcuts => draw_shortcuts_modal(mem_dc, win_w, win_h, dpi),
             ModalDialog::None => {}
         }
 
@@ -2831,13 +3135,14 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
     }
 }
 
-fn draw_operation_bar(state: &AppState, hdc: HDC, width: i32) {
+fn draw_operation_bar(state: &AppState, hdc: HDC, width: i32, dpi: u32) {
     unsafe {
+        let bar_h = get_bar_height(dpi);
         let bar_rect = RECT {
             left: 0,
             top: 0,
             right: width,
-            bottom: 45,
+            bottom: bar_h,
         };
         let brush = CreateSolidBrush(M3_SURFACE_BAR);
         let _ = FillRect(hdc, &bar_rect, brush);
@@ -2846,57 +3151,196 @@ fn draw_operation_bar(state: &AppState, hdc: HDC, width: i32) {
         let line_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
         let line_r = RECT {
             left: 0,
-            top: 44,
+            top: bar_h - 1,
             right: width,
-            bottom: 45,
+            bottom: bar_h,
         };
         let _ = FillRect(hdc, &line_r, line_brush);
         let _ = DeleteObject(line_brush.into());
 
         let _ = SetBkMode(hdc, TRANSPARENT);
 
-        // Group 1: Source & View Controls
-        draw_modern_button(hdc, 10, 6, 80, 32, "開く", ModernButtonStyle::SecondaryTonal, 8);
-        let view_txt = if state.view_mode == ViewMode::Normal {
-            "通常"
-        } else {
-            "合成"
-        };
-        draw_modern_button(hdc, 95, 6, 65, 32, view_txt, ModernButtonStyle::SegmentActive, 8);
+        let radius = scale_by_dpi(8, dpi);
+        let buttons = get_operation_bar_buttons(dpi);
 
-        // Group 2: Target & Layout Controls
-        let mon_str = format!(
-            "モニタ {}",
-            state.target_monitor().map_or(1, |m| m.number)
-        );
-        draw_modern_button(hdc, 165, 6, 75, 32, &mon_str, ModernButtonStyle::SecondaryTonal, 8);
-
-        let split_str = match state.config.layout.mode.as_str() {
-            "single" => "分割: 1",
-            "split2" => "分割: 2",
-            "split3" => "分割: 3",
-            _ => "分割: 自動",
-        };
-        draw_modern_button(hdc, 245, 6, 70, 32, split_str, ModernButtonStyle::SecondaryTonal, 8);
-
-        let scale_str = format!("倍率 {:.2}", state.config.layout.max_scale);
-        draw_modern_button(hdc, 320, 6, 65, 32, &scale_str, ModernButtonStyle::SecondaryTonal, 8);
-
-        // Group 3: Primary Action (Material 3 Expressive FAB Pill)
-        draw_modern_button(hdc, 390, 6, 60, 32, "適用", ModernButtonStyle::Primary, 8);
-
-        // Group 4: Secondary & Undo Controls
-        draw_modern_button(hdc, 455, 6, 65, 32, "ランダム", ModernButtonStyle::SecondaryTonal, 8);
-        draw_modern_button(hdc, 525, 6, 75, 32, "壁紙更新", ModernButtonStyle::SecondaryTonal, 8);
-        draw_modern_button(hdc, 605, 6, 70, 32, "元に戻す", ModernButtonStyle::SecondaryTonal, 8);
-
-        // Group 5: Utility & Settings & Shortcuts
-        draw_modern_button(hdc, 680, 6, 70, 32, "PNG保存", ModernButtonStyle::Ghost, 8);
-        draw_modern_button(hdc, 755, 6, 55, 32, "設定", ModernButtonStyle::Ghost, 8);
-        draw_modern_button(hdc, 815, 6, 70, 32, "操作一覧", ModernButtonStyle::Ghost, 8);
+        for (id, r) in buttons {
+            let w = r.right - r.left;
+            let h = r.bottom - r.top;
+            match id {
+                BarButtonId::Open => {
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        "開く",
+                        ModernButtonStyle::SecondaryTonal,
+                        radius,
+                    );
+                }
+                BarButtonId::ViewMode => {
+                    let view_txt = if state.view_mode == ViewMode::Normal {
+                        "通常"
+                    } else {
+                        "合成"
+                    };
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        view_txt,
+                        ModernButtonStyle::SegmentActive,
+                        radius,
+                    );
+                }
+                BarButtonId::Monitor => {
+                    let mon_str = format!(
+                        "モニタ {}",
+                        state.target_monitor().map_or(1, |m| m.number)
+                    );
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        &mon_str,
+                        ModernButtonStyle::SecondaryTonal,
+                        radius,
+                    );
+                }
+                BarButtonId::Split => {
+                    let split_str = match state.config.layout.mode.as_str() {
+                        "single" => "分割: 1",
+                        "split2" => "分割: 2",
+                        "split3" => "分割: 3",
+                        _ => "分割: 自動",
+                    };
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        split_str,
+                        ModernButtonStyle::SecondaryTonal,
+                        radius,
+                    );
+                }
+                BarButtonId::Scale => {
+                    let scale_str = format!("倍率 {:.2}", state.config.layout.max_scale);
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        &scale_str,
+                        ModernButtonStyle::SecondaryTonal,
+                        radius,
+                    );
+                }
+                BarButtonId::Apply => {
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        "適用",
+                        ModernButtonStyle::Primary,
+                        radius,
+                    );
+                }
+                BarButtonId::Random => {
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        "ランダム",
+                        ModernButtonStyle::SecondaryTonal,
+                        radius,
+                    );
+                }
+                BarButtonId::UpdateWallpaper => {
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        "壁紙更新",
+                        ModernButtonStyle::SecondaryTonal,
+                        radius,
+                    );
+                }
+                BarButtonId::Undo => {
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        "元に戻す",
+                        ModernButtonStyle::SecondaryTonal,
+                        radius,
+                    );
+                }
+                BarButtonId::SavePng => {
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        "PNG保存",
+                        ModernButtonStyle::Ghost,
+                        radius,
+                    );
+                }
+                BarButtonId::Settings => {
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        "設定",
+                        ModernButtonStyle::Ghost,
+                        radius,
+                    );
+                }
+                BarButtonId::Shortcuts => {
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        "操作一覧",
+                        ModernButtonStyle::Ghost,
+                        radius,
+                    );
+                }
+            }
+        }
 
         if state.has_pinned_frames() {
-            draw_badge(hdc, width - 110, 11, "合成固定中", M3_CYAN_PINNED);
+            let badge_w = scale_by_dpi(110, dpi);
+            let badge_y = scale_by_dpi(11, dpi);
+            draw_badge(
+                hdc,
+                width - badge_w - scale_by_dpi(10, dpi),
+                badge_y,
+                "合成固定中",
+                M3_CYAN_PINNED,
+                dpi,
+            );
         }
     }
 }
@@ -2975,10 +3419,12 @@ fn draw_overlay_btn(hdc: HDC, x: i32, y: i32, w: i32, h: i32, text: &str) {
     }
 }
 
-fn draw_badge(hdc: HDC, x: i32, y: i32, text: &str, color: COLORREF) {
+fn draw_badge(hdc: HDC, x: i32, y: i32, text: &str, color: COLORREF, dpi: u32) {
     unsafe {
-        let w = osd_text_display_width(text) + 16;
-        let h = 22;
+        let text_w = scale_by_dpi(osd_text_display_width(text), dpi);
+        let pad = scale_by_dpi(16, dpi);
+        let w = text_w + pad;
+        let h = scale_by_dpi(24, dpi);
         let r = RECT {
             left: x,
             top: y,
@@ -2998,15 +3444,16 @@ fn draw_badge(hdc: HDC, x: i32, y: i32, text: &str, color: COLORREF) {
     }
 }
 
-fn draw_info_overlay(state: &AppState, hdc: HDC, win_h: i32) {
+fn draw_info_overlay(state: &AppState, hdc: HDC, win_h: i32, dpi: u32) {
     unsafe {
-        let info_w = 340;
-        let info_h = 100;
+        let info_w = scale_by_dpi(360, dpi);
+        let info_h = scale_by_dpi(110, dpi);
+        let margin = scale_by_dpi(16, dpi);
         let r = RECT {
-            left: 16,
-            top: win_h - info_h - 16,
-            right: 16 + info_w,
-            bottom: win_h - 16,
+            left: margin,
+            top: win_h - info_h - margin,
+            right: margin + info_w,
+            bottom: win_h - margin,
         };
 
         // Material 3 Frosted Glass Surface
@@ -3042,29 +3489,33 @@ fn draw_info_overlay(state: &AppState, hdc: HDC, win_h: i32) {
             state.config.layout.max_scale, state.config.layout.border_px
         );
 
+        let pad_x = scale_by_dpi(14, dpi);
+        let idx_w = scale_by_dpi(80, dpi);
+        let line_h = scale_by_dpi(22, dpi);
+
         let mut r1_name = RECT {
-            left: r.left + 14,
-            top: r.top + 10,
-            right: r.right - 80,
-            bottom: r.top + 32,
+            left: r.left + pad_x,
+            top: r.top + scale_by_dpi(10, dpi),
+            right: r.right - idx_w,
+            bottom: r.top + scale_by_dpi(10, dpi) + line_h,
         };
         let mut r1_idx = RECT {
-            left: r.right - 80,
-            top: r.top + 10,
-            right: r.right - 14,
-            bottom: r.top + 32,
+            left: r.right - idx_w,
+            top: r.top + scale_by_dpi(10, dpi),
+            right: r.right - pad_x,
+            bottom: r.top + scale_by_dpi(10, dpi) + line_h,
         };
         let mut r2 = RECT {
-            left: r.left + 14,
-            top: r.top + 38,
-            right: r.right - 14,
-            bottom: r.top + 60,
+            left: r.left + pad_x,
+            top: r.top + scale_by_dpi(38, dpi),
+            right: r.right - pad_x,
+            bottom: r.top + scale_by_dpi(38, dpi) + line_h,
         };
         let mut r3 = RECT {
-            left: r.left + 14,
-            top: r.top + 65,
-            right: r.right - 14,
-            bottom: r.top + 87,
+            left: r.left + pad_x,
+            top: r.top + scale_by_dpi(65, dpi),
+            right: r.right - pad_x,
+            bottom: r.top + scale_by_dpi(65, dpi) + line_h,
         };
 
         let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
@@ -3080,9 +3531,9 @@ fn draw_info_overlay(state: &AppState, hdc: HDC, win_h: i32) {
     }
 }
 
-fn draw_osd_notification(hdc: HDC, text: &str, win_w: i32, has_undo: bool) {
+fn draw_osd_notification(hdc: HDC, text: &str, win_w: i32, has_undo: bool, dpi: u32) {
     unsafe {
-        let r = osd_notification_rect(text, win_w, has_undo);
+        let r = osd_notification_rect_dpi(text, win_w, has_undo, dpi);
 
         let brush = CreateSolidBrush(rgb(20, 36, 28)); // Deep emerald container
         let _ = FillRect(hdc, &r, brush);
@@ -3095,16 +3546,17 @@ fn draw_osd_notification(hdc: HDC, text: &str, win_w: i32, has_undo: bool) {
         let _ = SetBkMode(hdc, TRANSPARENT);
         let _ = SetTextColor(hdc, M3_SECONDARY_MINT);
 
+        let right_pad = scale_by_dpi(if has_undo { 120 } else { 16 }, dpi);
         let mut tr = RECT {
-            left: r.left + 16,
+            left: r.left + scale_by_dpi(16, dpi),
             top: r.top,
-            right: r.right - if has_undo { 120 } else { 16 },
+            right: r.right - right_pad,
             bottom: r.bottom,
         };
         draw_text(hdc, text, &mut tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         if has_undo {
-            let btn_r = osd_undo_button_rect(text, win_w);
+            let btn_r = osd_undo_button_rect_dpi(text, win_w, dpi);
             draw_modern_button(
                 hdc,
                 btn_r.left,
@@ -3113,20 +3565,21 @@ fn draw_osd_notification(hdc: HDC, text: &str, win_w: i32, has_undo: bool) {
                 btn_r.bottom - btn_r.top,
                 "元に戻す",
                 ModernButtonStyle::SecondaryTonal,
-                6,
+                scale_by_dpi(6, dpi),
             );
         }
     }
 }
 
-fn draw_error_banner(hdc: HDC, errors: &[String], win_w: i32) {
+fn draw_error_banner(hdc: HDC, errors: &[String], win_w: i32, dpi: u32) {
     unsafe {
-        let banner_h = 36;
+        let bar_h = get_bar_height(dpi);
+        let banner_h = scale_by_dpi(36, dpi);
         let r = RECT {
             left: 0,
-            top: 45,
+            top: bar_h,
             right: win_w,
-            bottom: 45 + banner_h,
+            bottom: bar_h + banner_h,
         };
         let brush = CreateSolidBrush(rgb(56, 18, 18)); // M3 Dark Crimson error container
         let _ = FillRect(hdc, &r, brush);
@@ -3141,19 +3594,19 @@ fn draw_error_banner(hdc: HDC, errors: &[String], win_w: i32) {
 
         let msg = errors.join(" | ");
         let mut tr = RECT {
-            left: 16,
+            left: scale_by_dpi(16, dpi),
             top: r.top,
-            right: win_w - 50,
+            right: win_w - scale_by_dpi(50, dpi),
             bottom: r.bottom,
         };
         draw_text(hdc, &msg, &mut tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
 }
 
-fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
+fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32, dpi: u32) {
     unsafe {
-        let box_w = 520;
-        let box_h = 430;
+        let box_w = scale_by_dpi(520, dpi);
+        let box_h = scale_by_dpi(430, dpi);
         let bx = (win_w - box_w) / 2;
         let by = (win_h - box_h) / 2;
         let modal_r = RECT {
@@ -3175,10 +3628,10 @@ fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
         // Header Divider
         let div_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
         let div_r = RECT {
-            left: bx + 16,
-            top: by + 50,
-            right: bx + box_w - 16,
-            bottom: by + 51,
+            left: bx + scale_by_dpi(16, dpi),
+            top: by + scale_by_dpi(50, dpi),
+            right: bx + box_w - scale_by_dpi(16, dpi),
+            bottom: by + scale_by_dpi(51, dpi),
         };
         let _ = FillRect(hdc, &div_r, div_brush);
         let _ = DeleteObject(div_brush.into());
@@ -3187,51 +3640,142 @@ fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
         let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
 
         let mut tr = RECT {
-            left: bx + 24,
-            top: by + 16,
-            right: bx + box_w - 24,
-            bottom: by + 45,
+            left: bx + scale_by_dpi(24, dpi),
+            top: by + scale_by_dpi(16, dpi),
+            right: bx + box_w - scale_by_dpi(24, dpi),
+            bottom: by + scale_by_dpi(45, dpi),
         };
         draw_text(hdc, "設定", &mut tr, DT_LEFT | DT_SINGLELINE);
 
         let _ = SetTextColor(hdc, M3_TEXT_SECONDARY);
 
+        let btn_h28 = scale_by_dpi(28, dpi);
+        let r_radius = scale_by_dpi(6, dpi);
+
         // Row 1: Max Scale M
+        let row1_y = by + scale_by_dpi(60, dpi);
         let mut r1 = RECT {
-            left: bx + 24,
-            top: by + 65,
-            right: bx + 150,
-            bottom: by + 90,
+            left: bx + scale_by_dpi(24, dpi),
+            top: row1_y + scale_by_dpi(5, dpi),
+            right: bx + scale_by_dpi(150, dpi),
+            bottom: row1_y + btn_h28,
         };
         draw_text(hdc, "最大拡大率 M:", &mut r1, DT_LEFT | DT_SINGLELINE);
-        draw_modern_button(hdc, bx + 160, by + 60, 40, 28, "-", ModernButtonStyle::SecondaryTonal, 6);
+        let minus_x = bx + scale_by_dpi(160, dpi);
+        let minus_w = scale_by_dpi(40, dpi);
+        let val_x = bx + scale_by_dpi(210, dpi);
+        let val_w = scale_by_dpi(60, dpi);
+        let plus_x = bx + scale_by_dpi(280, dpi);
+        let plus_w = scale_by_dpi(40, dpi);
+        draw_modern_button(
+            hdc,
+            minus_x,
+            row1_y,
+            minus_w,
+            btn_h28,
+            "-",
+            ModernButtonStyle::SecondaryTonal,
+            r_radius,
+        );
         let m_str = format!("{:.2}", state.config.layout.max_scale);
-        draw_modern_button(hdc, bx + 210, by + 60, 60, 28, &m_str, ModernButtonStyle::SegmentActive, 6);
-        draw_modern_button(hdc, bx + 280, by + 60, 40, 28, "+", ModernButtonStyle::SecondaryTonal, 6);
+        draw_modern_button(
+            hdc,
+            val_x,
+            row1_y,
+            val_w,
+            btn_h28,
+            &m_str,
+            ModernButtonStyle::SegmentActive,
+            r_radius,
+        );
+        draw_modern_button(
+            hdc,
+            plus_x,
+            row1_y,
+            plus_w,
+            btn_h28,
+            "+",
+            ModernButtonStyle::SecondaryTonal,
+            r_radius,
+        );
 
         // Row 2: Border px
+        let row2_y = by + scale_by_dpi(105, dpi);
         let mut r2 = RECT {
-            left: bx + 24,
-            top: by + 110,
-            right: bx + 150,
-            bottom: by + 135,
+            left: bx + scale_by_dpi(24, dpi),
+            top: row2_y + scale_by_dpi(5, dpi),
+            right: bx + scale_by_dpi(150, dpi),
+            bottom: row2_y + btn_h28,
         };
         draw_text(hdc, "境界線幅:", &mut r2, DT_LEFT | DT_SINGLELINE);
-        draw_modern_button(hdc, bx + 160, by + 105, 40, 28, "-", ModernButtonStyle::SecondaryTonal, 6);
+        draw_modern_button(
+            hdc,
+            minus_x,
+            row2_y,
+            minus_w,
+            btn_h28,
+            "-",
+            ModernButtonStyle::SecondaryTonal,
+            r_radius,
+        );
         let b_str = format!("{} px", state.config.layout.border_px);
-        draw_modern_button(hdc, bx + 210, by + 105, 60, 28, &b_str, ModernButtonStyle::SegmentActive, 6);
-        draw_modern_button(hdc, bx + 280, by + 105, 40, 28, "+", ModernButtonStyle::SecondaryTonal, 6);
+        draw_modern_button(
+            hdc,
+            val_x,
+            row2_y,
+            val_w,
+            btn_h28,
+            &b_str,
+            ModernButtonStyle::SegmentActive,
+            r_radius,
+        );
+        draw_modern_button(
+            hdc,
+            plus_x,
+            row2_y,
+            plus_w,
+            btn_h28,
+            "+",
+            ModernButtonStyle::SecondaryTonal,
+            r_radius,
+        );
 
         // Row 3: Random split mode
+        let row3_y = by + scale_by_dpi(150, dpi);
         let mut r3 = RECT {
-            left: bx + 24,
-            top: by + 155,
-            right: bx + 150,
-            bottom: by + 180,
+            left: bx + scale_by_dpi(24, dpi),
+            top: row3_y + scale_by_dpi(5, dpi),
+            right: bx + scale_by_dpi(150, dpi),
+            bottom: row3_y + btn_h28,
         };
         draw_text(hdc, "ランダム分割:", &mut r3, DT_LEFT | DT_SINGLELINE);
         let r_mode = state.config.random.mode.as_str();
-        let modes = [("自動", "auto", bx + 160, 55), ("1枠", "single", bx + 225, 48), ("2枠", "split2", bx + 280, 48), ("3枠", "split3", bx + 335, 48)];
+        let modes = [
+            (
+                "自動",
+                "auto",
+                bx + scale_by_dpi(160, dpi),
+                scale_by_dpi(60, dpi),
+            ),
+            (
+                "1枠",
+                "single",
+                bx + scale_by_dpi(225, dpi),
+                scale_by_dpi(50, dpi),
+            ),
+            (
+                "2枠",
+                "split2",
+                bx + scale_by_dpi(280, dpi),
+                scale_by_dpi(50, dpi),
+            ),
+            (
+                "3枠",
+                "split3",
+                bx + scale_by_dpi(335, dpi),
+                scale_by_dpi(50, dpi),
+            ),
+        ];
         for (lbl, val, btn_x, btn_w) in modes {
             let is_sel = r_mode == val;
             let style = if is_sel {
@@ -3239,15 +3783,16 @@ fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
             } else {
                 ModernButtonStyle::SegmentInactive
             };
-            draw_modern_button(hdc, btn_x, by + 150, btn_w, 28, lbl, style, 6);
+            draw_modern_button(hdc, btn_x, row3_y, btn_w, btn_h28, lbl, style, r_radius);
         }
 
         // Row 4: Schedule enabled
+        let row4_y = by + scale_by_dpi(195, dpi);
         let mut r4 = RECT {
-            left: bx + 24,
-            top: by + 200,
-            right: bx + 150,
-            bottom: by + 225,
+            left: bx + scale_by_dpi(24, dpi),
+            top: row4_y + scale_by_dpi(5, dpi),
+            right: bx + scale_by_dpi(150, dpi),
+            bottom: row4_y + btn_h28,
         };
         draw_text(hdc, "定期更新:", &mut r4, DT_LEFT | DT_SINGLELINE);
         let en_style = if state.config.schedule.enabled {
@@ -3255,15 +3800,30 @@ fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
         } else {
             ModernButtonStyle::SegmentInactive
         };
-        let en_str = if state.config.schedule.enabled { "有効 (ON)" } else { "無効 (OFF)" };
-        draw_modern_button(hdc, bx + 160, by + 195, 100, 28, en_str, en_style, 6);
+        let en_str = if state.config.schedule.enabled {
+            "有効 (ON)"
+        } else {
+            "無効 (OFF)"
+        };
+        let en_w = scale_by_dpi(100, dpi);
+        draw_modern_button(
+            hdc,
+            bx + scale_by_dpi(160, dpi),
+            row4_y,
+            en_w,
+            btn_h28,
+            en_str,
+            en_style,
+            r_radius,
+        );
 
         // Row 5: Schedule on logon
+        let row5_y = by + scale_by_dpi(240, dpi);
         let mut r5 = RECT {
-            left: bx + 24,
-            top: by + 245,
-            right: bx + 150,
-            bottom: by + 270,
+            left: bx + scale_by_dpi(24, dpi),
+            top: row5_y + scale_by_dpi(5, dpi),
+            right: bx + scale_by_dpi(150, dpi),
+            bottom: row5_y + btn_h28,
         };
         draw_text(hdc, "ログオン時更新:", &mut r5, DT_LEFT | DT_SINGLELINE);
         let log_style = if state.config.schedule.on_logon {
@@ -3271,15 +3831,29 @@ fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
         } else {
             ModernButtonStyle::SegmentInactive
         };
-        let log_str = if state.config.schedule.on_logon { "有効 (ON)" } else { "無効 (OFF)" };
-        draw_modern_button(hdc, bx + 160, by + 240, 100, 28, log_str, log_style, 6);
+        let log_str = if state.config.schedule.on_logon {
+            "有効 (ON)"
+        } else {
+            "無効 (OFF)"
+        };
+        draw_modern_button(
+            hdc,
+            bx + scale_by_dpi(160, dpi),
+            row5_y,
+            en_w,
+            btn_h28,
+            log_str,
+            log_style,
+            r_radius,
+        );
 
         // Row 6: Schedule interval
+        let row6_y = by + scale_by_dpi(285, dpi);
         let mut r6 = RECT {
-            left: bx + 24,
-            top: by + 290,
-            right: bx + 150,
-            bottom: by + 315,
+            left: bx + scale_by_dpi(24, dpi),
+            top: row6_y + scale_by_dpi(5, dpi),
+            right: bx + scale_by_dpi(150, dpi),
+            bottom: row6_y + btn_h28,
         };
         draw_text(hdc, "実行間隔:", &mut r6, DT_LEFT | DT_SINGLELINE);
         let int_str = match state.config.schedule.interval_minutes {
@@ -3288,17 +3862,40 @@ fn draw_settings_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
             m if m >= 60 => format!("{}時間 (クリックで変更)", m / 60),
             m => format!("{}分 (クリックで変更)", m),
         };
-        draw_modern_button(hdc, bx + 160, by + 285, 200, 28, &int_str, ModernButtonStyle::SecondaryTonal, 6);
+        let int_w = scale_by_dpi(200, dpi);
+        draw_modern_button(
+            hdc,
+            bx + scale_by_dpi(160, dpi),
+            row6_y,
+            int_w,
+            btn_h28,
+            &int_str,
+            ModernButtonStyle::SecondaryTonal,
+            r_radius,
+        );
 
         // Close button: Primary Pill Button
-        draw_modern_button(hdc, bx + 200, by + 375, 120, 34, "閉じる", ModernButtonStyle::Primary, 8);
+        let close_w = scale_by_dpi(120, dpi);
+        let close_h = scale_by_dpi(34, dpi);
+        let close_x = bx + (box_w - close_w) / 2;
+        let close_y = by + scale_by_dpi(375, dpi);
+        draw_modern_button(
+            hdc,
+            close_x,
+            close_y,
+            close_w,
+            close_h,
+            "閉じる",
+            ModernButtonStyle::Primary,
+            scale_by_dpi(8, dpi),
+        );
     }
 }
 
-fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
+fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32, dpi: u32) {
     unsafe {
-        let box_w = 540;
-        let box_h = 440;
+        let box_w = scale_by_dpi(540, dpi);
+        let box_h = scale_by_dpi(440, dpi);
         let bx = (win_w - box_w) / 2;
         let by = (win_h - box_h) / 2;
         let modal_r = RECT {
@@ -3320,10 +3917,10 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
         // Header Divider
         let div_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
         let div_r = RECT {
-            left: bx + 16,
-            top: by + 50,
-            right: bx + box_w - 16,
-            bottom: by + 51,
+            left: bx + scale_by_dpi(16, dpi),
+            top: by + scale_by_dpi(50, dpi),
+            right: bx + box_w - scale_by_dpi(16, dpi),
+            bottom: by + scale_by_dpi(51, dpi),
         };
         let _ = FillRect(hdc, &div_r, div_brush);
         let _ = DeleteObject(div_brush.into());
@@ -3332,10 +3929,10 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
         let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
 
         let mut tr = RECT {
-            left: bx + 24,
-            top: by + 16,
-            right: bx + box_w - 24,
-            bottom: by + 45,
+            left: bx + scale_by_dpi(24, dpi),
+            top: by + scale_by_dpi(16, dpi),
+            right: bx + box_w - scale_by_dpi(24, dpi),
+            bottom: by + scale_by_dpi(45, dpi),
         };
         draw_text(hdc, "除外画像一覧", &mut tr, DT_LEFT | DT_SINGLELINE);
 
@@ -3347,12 +3944,13 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
             .map(|it| (it.filename.as_str(), &it.path))
             .collect();
 
+        let r_radius = scale_by_dpi(6, dpi);
         if excluded_in_folder.is_empty() {
             let mut r_empty = RECT {
-                left: bx + 30,
-                top: by + 70,
-                right: bx + box_w - 30,
-                bottom: by + 100,
+                left: bx + scale_by_dpi(30, dpi),
+                top: by + scale_by_dpi(70, dpi),
+                right: bx + box_w - scale_by_dpi(30, dpi),
+                bottom: by + scale_by_dpi(100, dpi),
             };
             let _ = SetTextColor(hdc, M3_TEXT_MUTED);
             draw_text(
@@ -3364,43 +3962,92 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32) {
         } else {
             let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
             for (i, (fname, _)) in excluded_in_folder.iter().take(5).enumerate() {
-                let row_y = by + 60 + (i as i32) * 36;
+                let row_y = by + scale_by_dpi(60, dpi) + (i as i32) * scale_by_dpi(36, dpi);
                 let mut r_item = RECT {
-                    left: bx + 30,
-                    top: row_y + 4,
-                    right: bx + 420,
-                    bottom: row_y + 28,
+                    left: bx + scale_by_dpi(30, dpi),
+                    top: row_y + scale_by_dpi(4, dpi),
+                    right: bx + scale_by_dpi(420, dpi),
+                    bottom: row_y + scale_by_dpi(28, dpi),
                 };
                 draw_text(hdc, fname, &mut r_item, DT_LEFT | DT_SINGLELINE);
-                draw_modern_button(hdc, bx + 440, row_y, 60, 26, "解除", ModernButtonStyle::SecondaryTonal, 6);
+                draw_modern_button(
+                    hdc,
+                    bx + scale_by_dpi(440, dpi),
+                    row_y,
+                    scale_by_dpi(60, dpi),
+                    scale_by_dpi(26, dpi),
+                    "解除",
+                    ModernButtonStyle::SecondaryTonal,
+                    r_radius,
+                );
             }
         }
 
-        draw_modern_button(hdc, bx + 30, by + 250, 220, 30, "このフォルダを一括解除", ModernButtonStyle::SecondaryTonal, 6);
+        draw_modern_button(
+            hdc,
+            bx + scale_by_dpi(30, dpi),
+            by + scale_by_dpi(250, dpi),
+            scale_by_dpi(220, dpi),
+            scale_by_dpi(30, dpi),
+            "このフォルダを一括解除",
+            ModernButtonStyle::SecondaryTonal,
+            r_radius,
+        );
 
         let total_ex = state.catalog.excluded_paths.len();
         let other_count = total_ex.saturating_sub(excluded_in_folder.len());
         let mut r_other = RECT {
-            left: bx + 30,
-            top: by + 295,
-            right: bx + box_w - 30,
-            bottom: by + 320,
+            left: bx + scale_by_dpi(30, dpi),
+            top: by + scale_by_dpi(295, dpi),
+            right: bx + box_w - scale_by_dpi(30, dpi),
+            bottom: by + scale_by_dpi(320, dpi),
         };
         let _ = SetTextColor(hdc, M3_TEXT_SECONDARY);
         let other_txt = format!("他フォルダの除外パス: {}件", other_count);
         draw_text(hdc, &other_txt, &mut r_other, DT_LEFT | DT_SINGLELINE);
 
-        draw_modern_button(hdc, bx + 30, by + 325, 200, 30, "存在しないパスを整理", ModernButtonStyle::SecondaryTonal, 6);
-        draw_modern_button(hdc, bx + 245, by + 325, 200, 30, "他フォルダ分を一括解除", ModernButtonStyle::SecondaryTonal, 6);
+        draw_modern_button(
+            hdc,
+            bx + scale_by_dpi(30, dpi),
+            by + scale_by_dpi(325, dpi),
+            scale_by_dpi(200, dpi),
+            scale_by_dpi(30, dpi),
+            "存在しないパスを整理",
+            ModernButtonStyle::SecondaryTonal,
+            r_radius,
+        );
+        draw_modern_button(
+            hdc,
+            bx + scale_by_dpi(245, dpi),
+            by + scale_by_dpi(325, dpi),
+            scale_by_dpi(200, dpi),
+            scale_by_dpi(30, dpi),
+            "他フォルダ分を一括解除",
+            ModernButtonStyle::SecondaryTonal,
+            r_radius,
+        );
 
-        draw_modern_button(hdc, bx + 210, by + 380, 120, 34, "閉じる", ModernButtonStyle::Primary, 8);
+        let close_w = scale_by_dpi(120, dpi);
+        let close_h = scale_by_dpi(34, dpi);
+        let close_x = bx + (box_w - close_w) / 2;
+        let close_y = by + scale_by_dpi(380, dpi);
+        draw_modern_button(
+            hdc,
+            close_x,
+            close_y,
+            close_w,
+            close_h,
+            "閉じる",
+            ModernButtonStyle::Primary,
+            scale_by_dpi(8, dpi),
+        );
     }
 }
 
-fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32) {
+fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
     unsafe {
-        let box_w = 480;
-        let box_h = 540;
+        let box_w = scale_by_dpi(480, dpi);
+        let box_h = scale_by_dpi(540, dpi);
         let bx = (win_w - box_w) / 2;
         let by = (win_h - box_h) / 2;
         let modal_r = RECT {
@@ -3422,10 +4069,10 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32) {
         // Header Divider
         let div_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
         let div_r = RECT {
-            left: bx + 16,
-            top: by + 50,
-            right: bx + box_w - 16,
-            bottom: by + 51,
+            left: bx + scale_by_dpi(16, dpi),
+            top: by + scale_by_dpi(50, dpi),
+            right: bx + box_w - scale_by_dpi(16, dpi),
+            bottom: by + scale_by_dpi(51, dpi),
         };
         let _ = FillRect(hdc, &div_r, div_brush);
         let _ = DeleteObject(div_brush.into());
@@ -3434,10 +4081,10 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32) {
         let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
 
         let mut tr = RECT {
-            left: bx + 24,
-            top: by + 16,
-            right: bx + box_w - 24,
-            bottom: by + 45,
+            left: bx + scale_by_dpi(24, dpi),
+            top: by + scale_by_dpi(16, dpi),
+            right: bx + box_w - scale_by_dpi(24, dpi),
+            bottom: by + scale_by_dpi(45, dpi),
         };
         draw_text(hdc, "操作一覧", &mut tr, DT_LEFT | DT_SINGLELINE);
 
@@ -3467,19 +4114,21 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32) {
             ("Esc", "閉じる"),
         ];
 
+        let line_h = scale_by_dpi(18, dpi);
+        let split_x = bx + scale_by_dpi(240, dpi);
         for (i, (key, desc)) in lines.iter().enumerate() {
-            let row_top = by + 58 + (i as i32) * 18;
+            let row_top = by + scale_by_dpi(58, dpi) + (i as i32) * line_h;
             let mut lr_key = RECT {
-                left: bx + 24,
+                left: bx + scale_by_dpi(24, dpi),
                 top: row_top,
-                right: bx + 240,
-                bottom: row_top + 18,
+                right: split_x,
+                bottom: row_top + line_h,
             };
             let mut lr_desc = RECT {
-                left: bx + 240,
+                left: split_x,
                 top: row_top,
-                right: bx + box_w - 24,
-                bottom: row_top + 18,
+                right: bx + box_w - scale_by_dpi(24, dpi),
+                bottom: row_top + line_h,
             };
             let _ = SetTextColor(hdc, M3_PRIMARY_ACCENT);
             draw_text(hdc, key, &mut lr_key, DT_LEFT | DT_SINGLELINE);
@@ -3487,7 +4136,20 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32) {
             draw_text(hdc, desc, &mut lr_desc, DT_LEFT | DT_SINGLELINE);
         }
 
-        draw_modern_button(hdc, bx + 180, by + 485, 120, 34, "閉じる", ModernButtonStyle::Primary, 8);
+        let close_w = scale_by_dpi(120, dpi);
+        let close_h = scale_by_dpi(34, dpi);
+        let close_x = bx + (box_w - close_w) / 2;
+        let close_y = by + scale_by_dpi(485, dpi);
+        draw_modern_button(
+            hdc,
+            close_x,
+            close_y,
+            close_w,
+            close_h,
+            "閉じる",
+            ModernButtonStyle::Primary,
+            scale_by_dpi(8, dpi),
+        );
     }
 }
 

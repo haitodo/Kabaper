@@ -968,3 +968,107 @@ fn test_acceptance_random_image_composite_view() {
 
     let _ = fs::remove_dir_all(&temp);
 }
+
+
+#[test]
+fn test_acceptance_dpi_scaling_operation_bar() {
+    let dpi_100 = 96;
+    let dpi_150 = 144;
+
+    assert_eq!(kabaper::ui::get_bar_height(dpi_100), 45);
+    assert_eq!(kabaper::ui::get_bar_height(dpi_150), 68);
+
+    let btns_100 = kabaper::ui::get_operation_bar_buttons(dpi_100);
+    let btns_150 = kabaper::ui::get_operation_bar_buttons(dpi_150);
+
+    assert_eq!(btns_100.len(), btns_150.len());
+
+    for (b100, b150) in btns_100.iter().zip(btns_150.iter()) {
+        assert_eq!(b100.0, b150.0);
+        let w100 = b100.1.right - b100.1.left;
+        let w150 = b150.1.right - b150.1.left;
+        let h100 = b100.1.bottom - b100.1.top;
+        let h150 = b150.1.bottom - b150.1.top;
+
+        assert_eq!(h100, 32);
+        assert_eq!(h150, 48); // 32 * 1.5 = 48
+
+        // Width must be scaled proportionally by ~1.5
+        let expected_w150 = ((w100 as f32) * 1.5).round() as i32;
+        assert!(
+            (w150 - expected_w150).abs() <= 1,
+            "Button {:?} width {} must scale to approx {} at 150% DPI, got {}",
+            b100.0,
+            w100,
+            expected_w150,
+            w150
+        );
+    }
+
+    // Ensure buttons do not overlap horizontally
+    for i in 0..btns_150.len() - 1 {
+        assert!(
+            btns_150[i].1.right < btns_150[i + 1].1.left,
+            "Button {} and {} should not overlap at 150% DPI",
+            i,
+            i + 1
+        );
+    }
+}
+
+#[test]
+fn test_acceptance_dpi_scaling_frame_overlay_buttons() {
+    let fx = 100;
+    let fy = 200;
+    let fh = 400;
+
+    let btns_100 = kabaper::ui::get_frame_overlay_buttons(fx, fy, fh, 96);
+    let btns_150 = kabaper::ui::get_frame_overlay_buttons(fx, fy, fh, 144);
+
+    for (b100, b150) in btns_100.iter().zip(btns_150.iter()) {
+        assert_eq!(b100.0, b150.0);
+        let w100 = b100.1.right - b100.1.left;
+        let w150 = b150.1.right - b150.1.left;
+        let h100 = b100.1.bottom - b100.1.top;
+        let h150 = b150.1.bottom - b150.1.top;
+
+        assert_eq!(h100, 28);
+        assert_eq!(h150, 42); // 28 * 1.5 = 42
+        let expected_w150 = ((w100 as f32) * 1.5).round() as i32;
+        assert!(
+            (w150 - expected_w150).abs() <= 1,
+            "Frame overlay button width {} should scale to approx {} at 150% DPI, got {}",
+            w100,
+            expected_w150,
+            w150
+        );
+    }
+
+    for i in 0..btns_150.len() - 1 {
+        assert!(
+            btns_150[i].1.right < btns_150[i + 1].1.left,
+            "Frame overlay buttons {} and {} should not overlap at 150% DPI",
+            i,
+            i + 1
+        );
+    }
+}
+
+#[test]
+fn test_acceptance_dpi_scaling_empty_and_osd() {
+    let btn_100 = kabaper::ui::empty_state_folder_btn_rect_dpi(1920, 1080, 45, 96);
+    let btn_150 = kabaper::ui::empty_state_folder_btn_rect_dpi(1920, 1080, 68, 144);
+
+    assert_eq!(btn_100.right - btn_100.left, 220);
+    assert_eq!(btn_100.bottom - btn_100.top, 36);
+    assert_eq!(btn_150.right - btn_150.left, 330);
+    assert_eq!(btn_150.bottom - btn_150.top, 54);
+
+    let osd_btn_100 = kabaper::ui::osd_undo_button_rect_dpi("壁紙を変更しました", 1920, 96);
+    let osd_btn_150 = kabaper::ui::osd_undo_button_rect_dpi("壁紙を変更しました", 1920, 144);
+
+    assert_eq!(osd_btn_100.right - osd_btn_100.left, 95);
+    assert_eq!(osd_btn_100.bottom - osd_btn_100.top, 28);
+    assert_eq!(osd_btn_150.right - osd_btn_150.left, 143);
+    assert_eq!(osd_btn_150.bottom - osd_btn_150.top, 42);
+}
