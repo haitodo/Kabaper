@@ -31,15 +31,42 @@ pub fn run_gui(mut state: AppState, class_name: &str) -> Result<()> {
             .chain(std::iter::once(0))
             .collect();
 
+        // Load application icon from embedded resource (ID 1)
+        let h_icon = LoadImageW(
+            Some(instance.into()),
+            PCWSTR(1 as _),
+            IMAGE_ICON,
+            GetSystemMetrics(SM_CXICON),
+            GetSystemMetrics(SM_CYICON),
+            LR_DEFAULTCOLOR | LR_SHARED,
+        )
+        .ok()
+        .map(|handle| HICON(handle.0))
+        .unwrap_or_default();
+
+        let h_icon_sm = LoadImageW(
+            Some(instance.into()),
+            PCWSTR(1 as _),
+            IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON),
+            LR_DEFAULTCOLOR | LR_SHARED,
+        )
+        .ok()
+        .map(|handle| HICON(handle.0))
+        .unwrap_or_default();
+
         // Register main window class
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
             lpfnWndProc: Some(wnd_proc),
             hInstance: instance.into(),
+            hIcon: h_icon,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
             lpszClassName: PCWSTR(wide_class.as_ptr()),
+            hIconSm: h_icon_sm,
             ..Default::default()
         };
         let _ = RegisterClassExW(&wc);
@@ -106,6 +133,23 @@ pub fn run_gui(mut state: AppState, class_name: &str) -> Result<()> {
         state.hwnd = hwnd;
         state.normal_window_rect = rect;
         APP_STATE_PTR = &mut state as *mut AppState;
+
+        if !h_icon.is_invalid() {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_BIG as usize)),
+                Some(LPARAM(h_icon.0 as _)),
+            );
+        }
+        if !h_icon_sm.is_invalid() {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_SMALL as usize)),
+                Some(LPARAM(h_icon_sm.0 as _)),
+            );
+        }
 
         // Enable Dark Mode for title bar (Windows 10 1809+ / Windows 11)
         let dark_mode = BOOL::from(true);
