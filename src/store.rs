@@ -20,6 +20,52 @@ pub struct AppConfig {
     pub random: RandomConfig,
     pub schedule: ScheduleConfig,
     pub window: WindowConfig,
+    #[serde(default)]
+    pub presets: Vec<WallpaperPreset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FramePreset {
+    pub image_path: Option<String>,
+    pub pinned: bool,
+    pub pan: (f64, f64),
+}
+
+impl Default for FramePreset {
+    fn default() -> Self {
+        Self {
+            image_path: None,
+            pinned: false,
+            pan: (0.5, 0.5),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WallpaperPreset {
+    pub name: String,
+    pub monitor_id: Option<String>,
+    pub mode: String, // "auto" | "single" | "split2" | "split3"
+    pub max_scale: f64,
+    pub border_px: u32,
+    pub dim_ratio: f64,
+    pub frames: Vec<FramePreset>,
+}
+
+impl Default for WallpaperPreset {
+    fn default() -> Self {
+        Self {
+            name: "Default".to_string(),
+            monitor_id: None,
+            mode: "auto".to_string(),
+            max_scale: 1.25,
+            border_px: 2,
+            dim_ratio: 0.0,
+            frames: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -28,6 +74,8 @@ pub struct LibraryConfig {
     pub folder: Option<String>,
     pub last_image: Option<String>,
     pub excluded: Vec<String>,
+    #[serde(default)]
+    pub recent_folders: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +84,7 @@ pub struct LayoutConfig {
     pub max_scale: f64,
     pub border_px: u32,
     pub mode: String, // "auto" | "single" | "split2" | "split3"
+    pub dim_ratio: f64,
 }
 
 impl Default for LayoutConfig {
@@ -44,6 +93,7 @@ impl Default for LayoutConfig {
             max_scale: 1.25,
             border_px: 2,
             mode: "auto".to_string(),
+            dim_ratio: 0.0,
         }
     }
 }
@@ -122,6 +172,7 @@ impl Default for AppConfig {
             random: RandomConfig::default(),
             schedule: ScheduleConfig::default(),
             window: WindowConfig::default(),
+            presets: Vec::new(),
         }
     }
 }
@@ -244,6 +295,7 @@ impl Storage {
         cfg.layout.max_scale = (cfg.layout.max_scale * 20.0).round() / 20.0;
         cfg.layout.max_scale = cfg.layout.max_scale.clamp(1.00, 2.50);
         cfg.layout.border_px = cfg.layout.border_px.clamp(0, 8);
+        cfg.layout.dim_ratio = cfg.layout.dim_ratio.clamp(0.0, 0.8);
         if !matches!(
             cfg.layout.mode.as_str(),
             "auto" | "single" | "split2" | "split3"
@@ -293,6 +345,7 @@ impl Storage {
         cfg.layout.max_scale = (cfg.layout.max_scale * 20.0).round() / 20.0;
         cfg.layout.max_scale = cfg.layout.max_scale.clamp(1.00, 2.50);
         cfg.layout.border_px = cfg.layout.border_px.clamp(0, 8);
+        cfg.layout.dim_ratio = cfg.layout.dim_ratio.clamp(0.0, 0.8);
         if !matches!(
             cfg.layout.mode.as_str(),
             "auto" | "single" | "split2" | "split3"
@@ -656,6 +709,53 @@ mode = "split2"
         assert_eq!(cfg.layout.max_scale, 2.50);
         assert_eq!(cfg.layout.border_px, 8);
         assert_eq!(cfg.layout.mode, "split2");
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_preset_saving_and_loading() {
+        let temp =
+            std::env::temp_dir().join(format!("kabaper_test_preset_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+
+        let mut storage = Storage::init_with_dir(temp.clone()).unwrap();
+        let (mut cfg, _) = storage.load_config();
+        assert!(cfg.presets.is_empty());
+
+        let preset = WallpaperPreset {
+            name: "Favorite Pair".into(),
+            monitor_id: Some("MON1".into()),
+            mode: "split2".into(),
+            max_scale: 1.5,
+            border_px: 4,
+            dim_ratio: 0.3,
+            frames: vec![
+                FramePreset {
+                    image_path: Some("C:\\img1.jpg".into()),
+                    pinned: true,
+                    pan: (0.3, 0.7),
+                },
+                FramePreset {
+                    image_path: Some("C:\\img2.png".into()),
+                    pinned: false,
+                    pan: (0.5, 0.5),
+                },
+            ],
+        };
+        cfg.presets.push(preset);
+        assert!(storage.save_config(&cfg).is_ok());
+
+        let (reloaded, err) = storage.load_config();
+        assert!(err.is_none());
+        assert_eq!(reloaded.presets.len(), 1);
+        let p = &reloaded.presets[0];
+        assert_eq!(p.name, "Favorite Pair");
+        assert_eq!(p.mode, "split2");
+        assert_eq!(p.dim_ratio, 0.3);
+        assert_eq!(p.frames.len(), 2);
+        assert!(p.frames[0].pinned);
+        assert_eq!(p.frames[0].pan, (0.3, 0.7));
 
         let _ = fs::remove_dir_all(&temp);
     }

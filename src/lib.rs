@@ -6,5 +6,6 @@ pub mod layout;
 pub mod monitor;
 pub mod random;
 pub mod schedule;
+pub mod smart_pan;
 pub mod store;
 pub mod ui;

@@ -172,6 +172,15 @@ impl Catalog {
         }
     }
 
+    pub fn select_by_index(&mut self, idx: usize) -> bool {
+        if idx < self.items.len() {
+            self.current_index = Some(idx);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn toggle_exclude_current(&mut self) -> Option<bool> {
         let cur_path = self.current_item()?.path.clone();
         Some(self.toggle_exclude(&cur_path))
@@ -384,7 +393,7 @@ pub fn is_supported_image(path: &Path) -> bool {
     };
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "jpg" | "jpeg" | "png" | "bmp"
+        "jpg" | "jpeg" | "png" | "bmp" | "webp" | "avif"
     )
 }
 
@@ -565,7 +574,8 @@ mod tests {
         assert!(is_supported_image(Path::new("a.JPEG")));
         assert!(is_supported_image(Path::new("a.png")));
         assert!(is_supported_image(Path::new("a.bmp")));
-        assert!(!is_supported_image(Path::new("a.webp")));
+        assert!(is_supported_image(Path::new("a.webp")));
+        assert!(is_supported_image(Path::new("a.avif")));
         assert!(!is_supported_image(Path::new("a.gif")));
         assert!(!is_supported_image(Path::new("a.txt")));
     }

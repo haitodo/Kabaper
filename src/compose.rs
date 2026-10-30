@@ -62,6 +62,14 @@ pub fn compose_layout(
     plan: &LayoutPlan,
     images: &HashMap<ImageId, DecodedImage>,
 ) -> ComposedBitmap {
+    compose_layout_with_dim(plan, images, 0.0)
+}
+
+pub fn compose_layout_with_dim(
+    plan: &LayoutPlan,
+    images: &HashMap<ImageId, DecodedImage>,
+    dim_ratio: f64,
+) -> ComposedBitmap {
     let (mw, mh) = plan.monitor_px;
     let mut target = ComposedBitmap::new(mw, mh);
 
@@ -73,7 +81,7 @@ pub fn compose_layout(
             // Check if margin exists for background blur
             let has_margin = placed.blur_sigma > 0.0;
             if has_margin {
-                render_background_blur(&mut target, slot, img, placed.blur_sigma);
+                render_background_blur(&mut target, slot, img, placed.blur_sigma, dim_ratio);
             }
 
             // Render foreground image
@@ -146,6 +154,7 @@ fn render_background_blur(
     slot: RectPx,
     img: &DecodedImage,
     sigma: f64,
+    dim_ratio: f64,
 ) {
     if slot.width == 0 || slot.height == 0 || img.width == 0 || img.height == 0 {
         return;
@@ -194,6 +203,7 @@ fn render_background_blur(
 
     let sw_f = slot.width as f64;
     let sh_f = slot.height as f64;
+    let dim_factor = (1.0 - dim_ratio).clamp(0.0, 1.0);
 
     for y in min_y..max_y {
         let v = ((y as i32 - slot.y) as f64 + 0.5) / sh_f;
@@ -206,9 +216,15 @@ fn render_background_blur(
 
             let (b, g, r) = sample_small_bilinear(&blurred, small_w, small_h, bx, by);
             let p_off = row_offset + (x as usize) * 4;
-            target.pixels[p_off] = b;
-            target.pixels[p_off + 1] = g;
-            target.pixels[p_off + 2] = r;
+            if dim_ratio > 0.0 {
+                target.pixels[p_off] = (b as f64 * dim_factor).round() as u8;
+                target.pixels[p_off + 1] = (g as f64 * dim_factor).round() as u8;
+                target.pixels[p_off + 2] = (r as f64 * dim_factor).round() as u8;
+            } else {
+                target.pixels[p_off] = b;
+                target.pixels[p_off + 1] = g;
+                target.pixels[p_off + 2] = r;
+            }
             target.pixels[p_off + 3] = 255;
         }
     }
@@ -560,5 +576,54 @@ mod tests {
         assert!(res.is_ok(), "PNG save failed: {:?}", res);
         assert!(out_png.exists());
         let _ = std::fs::remove_file(out_png);
+    }
+
+    #[test]
+    fn test_compose_layout_dimming() {
+        let mut pixels = vec![0u8; 100 * 100 * 4];
+        for chunk in pixels.as_chunks_mut::<4>().0 {
+            chunk[0] = 200; // B
+            chunk[1] = 200; // G
+            chunk[2] = 200; // R
+            chunk[3] = 255; // A
+        }
+        let decoded = DecodedImage {
+            id: ImageId("test_white.jpg".into()),
+            orig_size: (100, 100),
+            width: 100,
+            height: 100,
+            pixels,
+        };
+
+        let mut images = HashMap::new();
+        images.insert(decoded.id.clone(), decoded);
+
+        let req = LayoutRequest {
+            monitor_px: (400, 100),
+            mode: LayoutMode::Fixed(1),
+            max_scale: 1.0,
+            border_px: 0,
+            frames: vec![FrameInput {
+                image: Some(ImageSpec {
+                    id: ImageId("test_white.jpg".into()),
+                    size_px: (100, 100),
+                }),
+                pinned: false,
+                pan: (0.5, 0.5),
+            }],
+        };
+
+        let plan = plan_layout(&req, &[]);
+        let composed_normal = compose_layout_with_dim(&plan, &images, 0.0);
+        let composed_dimmed = compose_layout_with_dim(&plan, &images, 0.5);
+
+        // Pixel at (10, 50) is in background blur area (since slot is 400x100, fg is 100x100 at center 150..250)
+        let (b_norm, _, _, _) = composed_normal.get_pixel(10, 50);
+        let (b_dim, _, _, _) = composed_dimmed.get_pixel(10, 50);
+        assert!(b_norm > 100);
+        assert!(b_dim < b_norm, "Dimmed pixel ({}) should be darker than normal ({})", b_dim, b_norm);
+        // Approximately 50%
+        let ratio = b_dim as f64 / b_norm as f64;
+        assert!((ratio - 0.5).abs() < 0.1, "Ratio was {}", ratio);
     }
 }

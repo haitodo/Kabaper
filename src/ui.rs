@@ -17,7 +17,7 @@ use windows::core::*;
 
 use crate::apply::WallpaperManager;
 use crate::catalog::{Catalog, is_supported_image, normalize_path};
-use crate::compose::{ComposedBitmap, compose_layout, save_png_wic};
+use crate::compose::{ComposedBitmap, compose_layout_with_dim, save_png_wic};
 use crate::decode::{DecodedImage, ImageDecoder};
 use crate::layout::{
     FrameInput, ImageId, ImageSpec, LayoutMode, LayoutPlan, LayoutRequest, ScaleLimit, plan_layout,
@@ -25,7 +25,8 @@ use crate::layout::{
 use crate::monitor::{MonitorInfo, enumerate_monitors};
 use crate::random::execute_random_update;
 use crate::schedule::SchedulerManager;
-use crate::store::{AppConfig, Storage};
+use crate::smart_pan::calculate_smart_pan;
+use crate::store::{AppConfig, FramePreset, Storage, WallpaperPreset};
 
 pub const OVERLAY_CLASS_NAME: PCWSTR = w!("KabaperOverlayClass");
 static SEQ_COUNTER: AtomicU32 = AtomicU32::new(1);
@@ -69,11 +70,16 @@ pub struct AppState {
     pub is_panning: bool,
     pub pan_start_mouse: (i32, i32),
     pub pan_start_val: (f64, f64),
+    pub normal_zoom: f64,
+    pub normal_pan_offset: (f64, f64),
+    pub normal_pan_start_offset: (f64, f64),
     pub modal_dialog: ModalDialog,
     pub hwnd: HWND,
     pub config_dirty: bool,
     pub last_config_change: Instant,
     pub recent_wallpapers: HashMap<String, Vec<PathBuf>>,
+    pub selected_preset_idx: usize,
+    pub show_filmstrip: bool,
 }
 
 impl AppState {
@@ -158,11 +164,16 @@ impl AppState {
             is_panning: false,
             pan_start_mouse: (0, 0),
             pan_start_val: (0.5, 0.5),
+            normal_zoom: 1.0,
+            normal_pan_offset: (0.0, 0.0),
+            normal_pan_start_offset: (0.0, 0.0),
             modal_dialog: ModalDialog::None,
             hwnd: HWND(std::ptr::null_mut()),
             config_dirty: false,
             last_config_change: Instant::now(),
             recent_wallpapers: HashMap::new(),
+            selected_preset_idx: 0,
+            show_filmstrip: false,
         };
 
         state.show_info = state.config.window.show_info;
@@ -212,12 +223,20 @@ impl AppState {
         self.layout_frames.iter().any(|f| f.pinned)
     }
 
+    pub fn add_recent_folder(&mut self, folder: &Path) {
+        let s = folder.to_string_lossy().to_string();
+        self.config.library.recent_folders.retain(|f| f != &s);
+        self.config.library.recent_folders.insert(0, s);
+        self.config.library.recent_folders.truncate(10);
+    }
+
     pub fn open_path(&mut self, p: &Path) {
         if p.is_file() {
             if is_supported_image(p) {
                 if let Some(parent) = p.parent()
                     && self.catalog.open_folder(parent, Some(p))
                 {
+                    self.add_recent_folder(parent);
                     self.config.library.folder = Some(parent.to_string_lossy().to_string());
                     self.config.library.last_image = Some(p.to_string_lossy().to_string());
                     self.mark_config_dirty();
@@ -233,6 +252,7 @@ impl AppState {
             }
         } else if p.is_dir() {
             if self.catalog.open_folder(p, None) {
+                self.add_recent_folder(p);
                 self.config.library.folder = Some(p.to_string_lossy().to_string());
                 self.config.library.last_image = self
                     .catalog
@@ -348,7 +368,7 @@ impl AppState {
         }
 
         // Re-compose layout bitmap
-        let composed = compose_layout(&plan, &self.cached_images);
+        let composed = compose_layout_with_dim(&plan, &self.cached_images, self.config.layout.dim_ratio);
 
         // Sync frames back
         self.layout_frames = plan
@@ -477,6 +497,7 @@ impl AppState {
 
     pub fn next_image(&mut self) {
         if self.view_mode == ViewMode::Normal {
+            self.reset_normal_zoom();
             self.catalog.next();
             if !self.has_pinned_frames() {
                 self.rebuild_layout(true, true);
@@ -533,6 +554,7 @@ impl AppState {
 
     pub fn prev_image(&mut self) {
         if self.view_mode == ViewMode::Normal {
+            self.reset_normal_zoom();
             self.catalog.prev();
             if !self.has_pinned_frames() {
                 self.rebuild_layout(true, true);
@@ -586,6 +608,7 @@ impl AppState {
 
     pub fn first_image(&mut self) {
         if self.view_mode == ViewMode::Normal {
+            self.reset_normal_zoom();
             self.catalog.first();
             if !self.has_pinned_frames() {
                 self.rebuild_layout(true, true);
@@ -635,6 +658,7 @@ impl AppState {
 
     pub fn last_image(&mut self) {
         if self.view_mode == ViewMode::Normal {
+            self.reset_normal_zoom();
             self.catalog.last();
             if !self.has_pinned_frames() {
                 self.rebuild_layout(true, true);
@@ -685,6 +709,7 @@ impl AppState {
 
     pub fn random_image(&mut self) {
         if self.view_mode == ViewMode::Normal {
+            self.reset_normal_zoom();
             if self.catalog.items.is_empty() {
                 self.set_osd("画像がありません".to_string(), 2, false);
                 return;
@@ -774,6 +799,7 @@ impl AppState {
     }
 
     pub fn switch_view_mode(&mut self) {
+        self.reset_normal_zoom();
         if self.view_mode == ViewMode::Normal {
             self.view_mode = ViewMode::Composite;
             self.set_osd("合成表示".into(), 2, false);
@@ -823,6 +849,181 @@ impl AppState {
             self.layout_frames[self.selected_frame_idx].pan = (0.5, 0.5);
             self.set_osd("パン位置を中央にリセットしました".into(), 2, false);
             self.rebuild_layout(false, false);
+        }
+    }
+
+    pub fn reset_normal_zoom(&mut self) {
+        self.normal_zoom = 1.0;
+        self.normal_pan_offset = (0.0, 0.0);
+    }
+
+    pub fn zoom_normal(&mut self, factor: f64) {
+        let old_zoom = self.normal_zoom;
+        let new_zoom = (self.normal_zoom * factor).clamp(1.0, 10.0);
+        self.normal_zoom = new_zoom;
+        if new_zoom <= 1.0 {
+            self.normal_pan_offset = (0.0, 0.0);
+            self.set_osd("ズーム: 全体表示 (Fit)".into(), 1, false);
+        } else {
+            let scale_change = new_zoom / old_zoom;
+            self.normal_pan_offset.0 *= scale_change;
+            self.normal_pan_offset.1 *= scale_change;
+            let percent = (self.normal_zoom * 100.0).round() as i32;
+            self.set_osd(format!("ズーム: {}%", percent), 1, false);
+        }
+    }
+
+    pub fn toggle_normal_100_percent(&mut self, canvas_w: i32, canvas_h: i32) {
+        if let Some(item) = self.catalog.current_item() {
+            let img_id = ImageId(item.path.to_string_lossy().to_string());
+            if let Some(dec) = self.cached_images.get(&img_id) {
+                let fit_scale = (canvas_w as f64 / dec.width as f64)
+                    .min(canvas_h as f64 / dec.height as f64)
+                    .min(1.0);
+                if fit_scale > 0.0 {
+                    let target_zoom = 1.0 / fit_scale;
+                    if (self.normal_zoom - target_zoom).abs() < 0.05 {
+                        self.reset_normal_zoom();
+                        self.set_osd("ズーム: 全体表示 (Fit)".into(), 1, false);
+                    } else {
+                        self.normal_zoom = target_zoom.clamp(1.0, 10.0);
+                        self.normal_pan_offset = (0.0, 0.0);
+                        self.set_osd("ズーム: 100% (等倍)".into(), 1, false);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn cycle_dim_ratio(&mut self) {
+        let cur = (self.config.layout.dim_ratio * 10.0).round() as i32;
+        let next_dim = match cur {
+            0 => 0.2,
+            2 => 0.4,
+            4 => 0.6,
+            _ => 0.0,
+        };
+        self.config.layout.dim_ratio = next_dim;
+        self.mark_config_dirty();
+        let pct = (next_dim * 100.0).round() as i32;
+        self.set_osd(format!("背景ぼかし減光: {}%", pct), 2, false);
+        self.rebuild_layout(false, false);
+    }
+
+    pub fn save_current_as_preset(&mut self) {
+        let preset_num = self.config.presets.len() + 1;
+        let name = format!("プリセット {}", preset_num);
+
+        let frames = self
+            .layout_frames
+            .iter()
+            .map(|f| FramePreset {
+                image_path: f.image.as_ref().map(|img| img.id.0.clone()),
+                pinned: f.pinned,
+                pan: f.pan,
+            })
+            .collect();
+
+        let preset = WallpaperPreset {
+            name: name.clone(),
+            monitor_id: self.target_monitor().map(|m| m.id.clone()),
+            mode: self.config.layout.mode.clone(),
+            max_scale: self.config.layout.max_scale,
+            border_px: self.config.layout.border_px,
+            dim_ratio: self.config.layout.dim_ratio,
+            frames,
+        };
+
+        self.config.presets.push(preset);
+        self.mark_config_dirty();
+        let _ = self.storage.save_config(&self.config);
+        self.set_osd(format!("「{}」を保存しました", name), 3, false);
+    }
+
+    pub fn load_next_preset(&mut self) {
+        if self.config.presets.is_empty() {
+            self.set_osd("保存されたプリセットがありません (Ctrl+Pで保存)".into(), 2, false);
+            return;
+        }
+
+        let idx = self.selected_preset_idx % self.config.presets.len();
+        let preset = self.config.presets[idx].clone();
+        self.selected_preset_idx = (idx + 1) % self.config.presets.len();
+
+        self.config.layout.mode = preset.mode;
+        self.config.layout.max_scale = preset.max_scale;
+        self.config.layout.border_px = preset.border_px;
+        self.config.layout.dim_ratio = preset.dim_ratio;
+
+        if let Some(target_id) = &preset.monitor_id {
+            if let Some(pos) = self.monitors.iter().position(|m| &m.id == target_id) {
+                self.target_monitor_idx = pos;
+            }
+        }
+
+        self.layout_frames.clear();
+        for fp in &preset.frames {
+            let spec = if let Some(path_str) = &fp.image_path {
+                self.decoder.read_image_spec(Path::new(path_str)).ok()
+            } else {
+                None
+            };
+            self.layout_frames.push(FrameInput {
+                image: spec,
+                pinned: fp.pinned,
+                pan: fp.pan,
+            });
+        }
+
+        self.view_mode = ViewMode::Composite;
+        self.rebuild_layout(false, false);
+        self.set_osd(
+            format!(
+                "プリセット適用: {} ({}/{})",
+                preset.name,
+                idx + 1,
+                self.config.presets.len()
+            ),
+            3,
+            false,
+        );
+    }
+
+    pub fn apply_smart_pan_current_frame(&mut self) {
+        if self.view_mode != ViewMode::Composite {
+            self.set_osd("合成表示でのみ有効です (Vキーで切替)".into(), 2, false);
+            return;
+        }
+
+        if let Some(frame) = self.layout_frames.get_mut(self.selected_frame_idx)
+            && let Some(spec) = &frame.image
+        {
+            let path = PathBuf::from(&spec.id.0);
+            let img_id = spec.id.clone();
+            if !self.cached_images.contains_key(&img_id) {
+                if let Ok(dec) = self.decoder.decode_image(&path, Some(4096)) {
+                    self.cached_images.insert(img_id.clone(), dec);
+                }
+            }
+
+            if let Some(dec) = self.cached_images.get(&img_id)
+                && let Some(plan) = &self.active_plan
+                && let Some(frame_plan) = plan.frames.get(self.selected_frame_idx)
+                && let Some(content) = &frame_plan.content
+            {
+                let slot = frame_plan.slot;
+                let (pan_x, pan_y) = calculate_smart_pan(dec, slot.width, slot.height, content.scale);
+                frame.pan = (pan_x, pan_y);
+                self.rebuild_layout(false, false);
+                self.set_osd(
+                    format!(
+                        "スマートパン: 枠{}を被写体・顔に自動調整しました",
+                        self.selected_frame_idx + 1
+                    ),
+                    2,
+                    false,
+                );
+            }
         }
     }
 
@@ -1477,14 +1678,18 @@ unsafe extern "system" fn wnd_proc(
             WM_SETCURSOR => {
                 let hit_canvas = (lparam.0 & 0xffff) as u32 == HTCLIENT;
                 if hit_canvas
-                    && state.view_mode == ViewMode::Composite
                     && state.modal_dialog == ModalDialog::None
                 {
-                    let mut pt = POINT::default();
-                    let _ = GetCursorPos(&mut pt);
-                    let _ = ScreenToClient(hwnd, &mut pt);
+                    if state.view_mode == ViewMode::Composite {
+                        let mut pt = POINT::default();
+                        let _ = GetCursorPos(&mut pt);
+                        let _ = ScreenToClient(hwnd, &mut pt);
 
-                    if is_over_pan_capable_frame(state, hwnd, pt.x, pt.y) {
+                        if is_over_pan_capable_frame(state, hwnd, pt.x, pt.y) {
+                            let _ = SetCursor(Some(LoadCursorW(None, IDC_SIZEALL).unwrap()));
+                            return LRESULT(1);
+                        }
+                    } else if state.view_mode == ViewMode::Normal && state.normal_zoom > 1.0 {
                         let _ = SetCursor(Some(LoadCursorW(None, IDC_SIZEALL).unwrap()));
                         return LRESULT(1);
                     }
@@ -1505,7 +1710,12 @@ unsafe extern "system" fn wnd_proc(
                 if state.is_panning {
                     let dx = x - state.pan_start_mouse.0;
                     let dy = y - state.pan_start_mouse.1;
-                    if let Some(frame) = state.layout_frames.get_mut(state.selected_frame_idx) {
+
+                    if state.view_mode == ViewMode::Normal {
+                        state.normal_pan_offset.0 = state.normal_pan_start_offset.0 + dx as f64;
+                        state.normal_pan_offset.1 = state.normal_pan_start_offset.1 + dy as f64;
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    } else if let Some(frame) = state.layout_frames.get_mut(state.selected_frame_idx) {
                         let can_pan = state
                             .active_plan
                             .as_ref()
@@ -1602,6 +1812,18 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
 
+                // Handle filmstrip click
+                if state.show_filmstrip {
+                    let mut cr = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut cr);
+                    let strip_h = scale_by_dpi(92, dpi);
+                    if y >= cr.bottom - strip_h {
+                        handle_filmstrip_click(state, x, cr.right, cr.bottom, dpi);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        return LRESULT(0);
+                    }
+                }
+
                 // Handle empty state folder button click
                 let is_empty = (state.view_mode == ViewMode::Composite
                     && state.active_composed.is_none())
@@ -1688,6 +1910,13 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
 
+                if state.view_mode == ViewMode::Normal && state.normal_zoom > 1.0 {
+                    state.is_panning = true;
+                    state.pan_start_mouse = (x, y);
+                    state.normal_pan_start_offset = state.normal_pan_offset;
+                    let _ = SetCapture(hwnd);
+                }
+
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
@@ -1724,8 +1953,16 @@ unsafe extern "system" fn wnd_proc(
                 let ctrl_down = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
 
                 if ctrl_down {
-                    let d = if delta > 0 { 0.05 } else { -0.05 };
-                    state.adjust_max_scale(d);
+                    if state.view_mode == ViewMode::Normal {
+                        if delta > 0 {
+                            state.zoom_normal(1.25);
+                        } else {
+                            state.zoom_normal(0.8);
+                        }
+                    } else {
+                        let d = if delta > 0 { 0.05 } else { -0.05 };
+                        state.adjust_max_scale(d);
+                    }
                 } else if delta < 0 {
                     state.next_image();
                 } else {
@@ -1813,13 +2050,32 @@ unsafe extern "system" fn wnd_proc(
                         if state.view_mode == ViewMode::Composite {
                             state.reset_pan();
                         } else {
-                            state.set_osd("合成表示でのみ有効です (Vキーで切替)".into(), 2, false);
+                            state.reset_normal_zoom();
+                            state.set_osd("ズーム: 全体表示 (Fit)".into(), 1, false);
                         }
                     }
                     VK_V => state.switch_view_mode(),
                     VK_L => state.cycle_layout_mode(!shift),
-                    VK_OEM_PLUS | VK_ADD => state.adjust_max_scale(0.05),
-                    VK_OEM_MINUS | VK_SUBTRACT => state.adjust_max_scale(-0.05),
+                    VK_OEM_PLUS | VK_ADD => {
+                        if state.view_mode == ViewMode::Normal {
+                            state.zoom_normal(1.25);
+                        } else {
+                            state.adjust_max_scale(0.05);
+                        }
+                    }
+                    VK_OEM_MINUS | VK_SUBTRACT => {
+                        if state.view_mode == ViewMode::Normal {
+                            state.zoom_normal(0.8);
+                        } else {
+                            state.adjust_max_scale(-0.05);
+                        }
+                    }
+                    VK_NUMPAD0 => {
+                        if state.view_mode == ViewMode::Normal {
+                            state.reset_normal_zoom();
+                            state.set_osd("ズーム: 全体表示 (Fit)".into(), 1, false);
+                        }
+                    }
                     VK_RETURN => {
                         let is_empty = (state.view_mode == ViewMode::Composite
                             && state.active_composed.is_none())
@@ -1841,8 +2097,44 @@ unsafe extern "system" fn wnd_proc(
                             state.trigger_random_update();
                         }
                     }
-                    VK_Z if ctrl => state.undo_wallpaper(),
+                    VK_Z => {
+                        if ctrl {
+                            state.undo_wallpaper();
+                        } else if state.view_mode == ViewMode::Normal {
+                            let mut cr = RECT::default();
+                            let _ = GetClientRect(hwnd, &mut cr);
+                            let dpi = get_window_dpi(hwnd);
+                            let bar_h = if state.bar_visible { get_bar_height(dpi) } else { 0 };
+                            let canvas_w = cr.right.max(1);
+                            let canvas_h = (cr.bottom - bar_h).max(1);
+                            state.toggle_normal_100_percent(canvas_w, canvas_h);
+                        }
+                    }
                     VK_S => state.export_png_dialog(),
+                    VK_D => state.cycle_dim_ratio(),
+                    VK_A => state.apply_smart_pan_current_frame(),
+                    VK_T => {
+                        state.show_filmstrip = !state.show_filmstrip;
+                        state.set_osd(
+                            format!(
+                                "フィルムストリップ: {}",
+                                if state.show_filmstrip {
+                                    "表示"
+                                } else {
+                                    "非表示"
+                                }
+                            ),
+                            2,
+                            false,
+                        );
+                    }
+                    VK_P => {
+                        if ctrl {
+                            state.save_current_as_preset();
+                        } else {
+                            state.load_next_preset();
+                        }
+                    }
                     VK_DELETE => state.toggle_exclude_current(),
                     VK_O if ctrl => state.open_folder_dialog(),
                     VK_F5 => {
@@ -2825,14 +3117,14 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32, dpi: u32
             }
             ModalDialog::Shortcuts => {
                 let box_w = scale_by_dpi(480, dpi);
-                let box_h = scale_by_dpi(540, dpi);
+                let box_h = scale_by_dpi(620, dpi);
                 let bx = (win_w - box_w) / 2;
                 let by = (win_h - box_h) / 2;
 
                 let close_w = scale_by_dpi(120, dpi);
                 let close_h = scale_by_dpi(34, dpi);
                 let close_x = bx + (box_w - close_w) / 2;
-                let close_y = by + scale_by_dpi(485, dpi);
+                let close_y = by + scale_by_dpi(565, dpi);
 
                 if x >= close_x && x <= close_x + close_w && y >= close_y && y <= close_y + close_h {
                     state.modal_dialog = ModalDialog::None;
@@ -3056,10 +3348,17 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                     let fit_scale = (canvas_w as f64 / dec.width as f64)
                         .min(canvas_h as f64 / dec.height as f64)
                         .min(1.0);
-                    let dw = (dec.width as f64 * fit_scale).round() as i32;
-                    let dh = (dec.height as f64 * fit_scale).round() as i32;
-                    let ox = (canvas_w - dw) / 2;
-                    let oy = bar_h + (canvas_h - dh) / 2;
+                    let current_scale = fit_scale * state.normal_zoom;
+                    let dw = (dec.width as f64 * current_scale).round() as i32;
+                    let dh = (dec.height as f64 * current_scale).round() as i32;
+
+                    let max_pan_x = ((dw - canvas_w) / 2).max(0) as f64;
+                    let max_pan_y = ((dh - canvas_h) / 2).max(0) as f64;
+                    let pan_x = state.normal_pan_offset.0.clamp(-max_pan_x, max_pan_x);
+                    let pan_y = state.normal_pan_offset.1.clamp(-max_pan_y, max_pan_y);
+
+                    let ox = (canvas_w - dw) / 2 + pan_x.round() as i32;
+                    let oy = bar_h + (canvas_h - dh) / 2 + pan_y.round() as i32;
 
                     let mut bi = BITMAPINFO::default();
                     bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -3070,6 +3369,7 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                     bi.bmiHeader.biCompression = BI_RGB.0;
 
                     let _ = SetStretchBltMode(mem_dc, HALFTONE);
+                    let _ = IntersectClipRect(mem_dc, 0, bar_h, canvas_w, bar_h + canvas_h);
                     let _ = StretchDIBits(
                         mem_dc,
                         ox,
@@ -3085,6 +3385,7 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                         DIB_RGB_COLORS,
                         SRCCOPY,
                     );
+                    let _ = SelectClipRgn(mem_dc, None);
                 }
             } else {
                 let msg = if state.catalog.items.is_empty() {
@@ -3104,6 +3405,11 @@ fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
         // Render Info Display
         if state.show_info {
             draw_info_overlay(state, mem_dc, win_h, dpi);
+        }
+
+        // Render Filmstrip
+        if state.show_filmstrip {
+            draw_filmstrip(state, mem_dc, win_w, win_h, dpi);
         }
 
         // Render OSD
@@ -3529,6 +3835,184 @@ fn draw_info_overlay(state: &AppState, hdc: HDC, win_h: i32, dpi: u32) {
         let _ = SetTextColor(hdc, M3_TEXT_MUTED);
         draw_text(hdc, &line3, &mut r3, DT_LEFT | DT_SINGLELINE);
     }
+}
+
+pub fn get_filmstrip_layout(
+    win_w: i32,
+    win_h: i32,
+    cur_idx: usize,
+    total_items: usize,
+    dpi: u32,
+) -> (i32, i32, i32, usize, usize) {
+    let strip_h = scale_by_dpi(92, dpi);
+    let strip_y = win_h - strip_h;
+    let item_w = scale_by_dpi(90, dpi);
+    let visible_count = ((win_w - scale_by_dpi(20, dpi)).max(item_w) / item_w) as usize;
+    let half = visible_count / 2;
+    let start_idx = cur_idx.saturating_sub(half).min(total_items.saturating_sub(visible_count));
+    let end_idx = (start_idx + visible_count).min(total_items);
+    (strip_y, strip_h, item_w, start_idx, end_idx)
+}
+
+fn draw_filmstrip(state: &AppState, hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
+    if state.catalog.items.is_empty() {
+        return;
+    }
+    unsafe {
+        let cur_idx = state.catalog.current_index.unwrap_or(0);
+        let total = state.catalog.items.len();
+        let (strip_y, strip_h, item_w, start_idx, end_idx) =
+            get_filmstrip_layout(win_w, win_h, cur_idx, total, dpi);
+
+        let strip_r = RECT {
+            left: 0,
+            top: strip_y,
+            right: win_w,
+            bottom: win_h,
+        };
+
+        // Dark background
+        let bg_brush = CreateSolidBrush(COLORREF(0x00181818));
+        let _ = FillRect(hdc, &strip_r, bg_brush);
+        let _ = DeleteObject(bg_brush.into());
+
+        // Top border
+        let border_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
+        let line_r = RECT {
+            left: 0,
+            top: strip_y,
+            right: win_w,
+            bottom: strip_y + 1,
+        };
+        let _ = FillRect(hdc, &line_r, border_brush);
+        let _ = DeleteObject(border_brush.into());
+
+        let thumb_w = scale_by_dpi(80, dpi);
+        let thumb_h = scale_by_dpi(54, dpi);
+        let pad_x = scale_by_dpi(5, dpi);
+        let pad_y = scale_by_dpi(8, dpi);
+
+        for (slot_idx, i) in (start_idx..end_idx).enumerate() {
+            let item = &state.catalog.items[i];
+            let item_x = (slot_idx as i32) * item_w + scale_by_dpi(10, dpi);
+            let item_y = strip_y + pad_y;
+
+            let card_r = RECT {
+                left: item_x,
+                top: item_y,
+                right: item_x + thumb_w,
+                bottom: item_y + thumb_h,
+            };
+
+            // Thumbnail card surface
+            let card_brush = CreateSolidBrush(if i == cur_idx {
+                COLORREF(0x003A3A3A)
+            } else {
+                COLORREF(0x00282828)
+            });
+            let _ = FillRect(hdc, &card_r, card_brush);
+            let _ = DeleteObject(card_brush.into());
+
+            // If decoded image is available in cache, draw miniature
+            let img_id = ImageId(item.path.to_string_lossy().to_string());
+            if let Some(dec) = state.cached_images.get(&img_id) {
+                let scale = (thumb_w as f64 / dec.width as f64)
+                    .min(thumb_h as f64 / dec.height as f64);
+                let dw = (dec.width as f64 * scale).round() as i32;
+                let dh = (dec.height as f64 * scale).round() as i32;
+                let ox = item_x + (thumb_w - dw) / 2;
+                let oy = item_y + (thumb_h - dh) / 2;
+
+                let mut bi = BITMAPINFO::default();
+                bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+                bi.bmiHeader.biWidth = dec.width as i32;
+                bi.bmiHeader.biHeight = -(dec.height as i32);
+                bi.bmiHeader.biPlanes = 1;
+                bi.bmiHeader.biBitCount = 32;
+                bi.bmiHeader.biCompression = BI_RGB.0;
+
+                let _ = SetStretchBltMode(hdc, HALFTONE);
+                let _ = StretchDIBits(
+                    hdc,
+                    ox,
+                    oy,
+                    dw,
+                    dh,
+                    0,
+                    0,
+                    dec.width as i32,
+                    dec.height as i32,
+                    Some(dec.pixels.as_ptr() as *const _),
+                    &bi,
+                    DIB_RGB_COLORS,
+                    SRCCOPY,
+                );
+            }
+
+            // Outline: accent border for currently selected image
+            let outline_color = if i == cur_idx {
+                COLORREF(0x00FF9933) // Accent
+            } else if item.is_excluded {
+                COLORREF(0x003333FF) // Excluded red
+            } else {
+                M3_OUTLINE
+            };
+            let outline_brush = CreateSolidBrush(outline_color);
+            let _ = FrameRect(hdc, &card_r, outline_brush);
+            let _ = DeleteObject(outline_brush.into());
+
+            // Filename label below thumbnail
+            let mut label_r = RECT {
+                left: item_x - pad_x,
+                top: item_y + thumb_h + scale_by_dpi(2, dpi),
+                right: item_x + thumb_w + pad_x,
+                bottom: strip_y + strip_h - scale_by_dpi(2, dpi),
+            };
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            let _ = SetTextColor(hdc, if i == cur_idx { M3_TEXT_PRIMARY } else { M3_TEXT_MUTED });
+            draw_text(hdc, &item.filename, &mut label_r, DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+    }
+}
+
+fn handle_filmstrip_click(state: &mut AppState, x: i32, win_w: i32, win_h: i32, dpi: u32) -> bool {
+    if !state.show_filmstrip || state.catalog.items.is_empty() {
+        return false;
+    }
+    let cur_idx = state.catalog.current_index.unwrap_or(0);
+    let total = state.catalog.items.len();
+    let (_, _, item_w, start_idx, end_idx) =
+        get_filmstrip_layout(win_w, win_h, cur_idx, total, dpi);
+
+    let offset_x = x - scale_by_dpi(10, dpi);
+    if offset_x < 0 {
+        return true;
+    }
+    let slot_idx = (offset_x / item_w) as usize;
+    let target_idx = start_idx + slot_idx;
+
+    if target_idx < end_idx && target_idx < state.catalog.items.len() {
+        if state.view_mode == ViewMode::Normal {
+            state.catalog.select_by_index(target_idx);
+            state.reset_normal_zoom();
+            if !state.has_pinned_frames() {
+                state.rebuild_layout(true, true);
+            }
+        } else {
+            let next_path = state.catalog.items[target_idx].path.clone();
+            if let Ok(spec) = state.decoder.read_image_spec(&next_path) {
+                if state.selected_frame_idx < state.layout_frames.len() {
+                    state.layout_frames[state.selected_frame_idx].image = Some(spec);
+                    state.layout_frames[state.selected_frame_idx].pan = (0.5, 0.5);
+                    if state.selected_frame_idx == 0 {
+                        state.catalog.select_by_path(&next_path);
+                    }
+                    state.rebuild_layout(false, false);
+                }
+            }
+        }
+    }
+    true
 }
 
 fn draw_osd_notification(hdc: HDC, text: &str, win_w: i32, has_undo: bool, dpi: u32) {
@@ -4047,7 +4531,7 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32, d
 fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
     unsafe {
         let box_w = scale_by_dpi(480, dpi);
-        let box_h = scale_by_dpi(540, dpi);
+        let box_h = scale_by_dpi(620, dpi);
         let bx = (win_w - box_w) / 2;
         let by = (win_h - box_h) / 2;
         let modal_r = RECT {
@@ -4093,13 +4577,18 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
             ("Shift+R / Ctrl+R", "画像のランダム入替"),
             ("Home / End", "先頭 / 末尾"),
             ("V / 中クリック", "通常 / 合成 切替"),
+            ("Z / 0", "通常表示: 等倍切替 / リセット"),
             ("Tab / Shift+Tab", "枠選択"),
             ("Space", "選択枠のピン留め切替"),
             ("Shift+Space", "枠の入れ替え"),
             ("左ドラッグ / Shift+矢印", "パン調整"),
             ("C", "パン位置リセット"),
+            ("A", "スマートパン (被写体/顔自動合わせ)"),
+            ("T", "フィルムストリップ表示切替"),
             ("L / Shift+L", "分割モード切替"),
-            ("Ctrl+ホイール / + / -", "拡大率変更"),
+            ("Ctrl+ホイール / + / -", "拡大率変更 / ズーム"),
+            ("D", "背景ぼかし減光切替 (0〜60%)"),
+            ("P / Ctrl+P", "プリセット切替 / 保存"),
             ("1〜9", "モニター選択"),
             ("Enter", "壁紙適用"),
             ("Ctrl+1〜9", "指定モニターへ即時適用"),
@@ -4114,7 +4603,7 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
             ("Esc", "閉じる"),
         ];
 
-        let line_h = scale_by_dpi(18, dpi);
+        let line_h = scale_by_dpi(17, dpi);
         let split_x = bx + scale_by_dpi(240, dpi);
         for (i, (key, desc)) in lines.iter().enumerate() {
             let row_top = by + scale_by_dpi(58, dpi) + (i as i32) * line_h;
@@ -4139,7 +4628,7 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
         let close_w = scale_by_dpi(120, dpi);
         let close_h = scale_by_dpi(34, dpi);
         let close_x = bx + (box_w - close_w) / 2;
-        let close_y = by + scale_by_dpi(485, dpi);
+        let close_y = by + scale_by_dpi(565, dpi);
         draw_modern_button(
             hdc,
             close_x,
@@ -4254,8 +4743,28 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
     unsafe {
         let menu = CreatePopupMenu().unwrap();
         let _ = AppendMenuW(menu, MF_STRING, 1001, w!("フォルダを開く (Ctrl+O)"));
+
+        if !state.config.library.recent_folders.is_empty() {
+            let recent_menu = CreatePopupMenu().unwrap();
+            for (idx, rf) in state.config.library.recent_folders.iter().take(5).enumerate() {
+                let wide_rf: Vec<u16> = rf.encode_utf16().chain(std::iter::once(0)).collect();
+                let _ = AppendMenuW(
+                    recent_menu,
+                    MF_STRING,
+                    2000 + idx,
+                    PCWSTR(wide_rf.as_ptr()),
+                );
+            }
+            let _ = AppendMenuW(menu, MF_POPUP, recent_menu.0 as usize, w!("最近開いたフォルダ"));
+        }
+
         let _ = AppendMenuW(menu, MF_STRING, 1002, w!("再読込 (F5)"));
         let _ = AppendMenuW(menu, MF_STRING, 1006, w!("画像をランダム入替 (Shift+R)"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
+        let _ = AppendMenuW(menu, MF_STRING, 1007, w!("スマートパン (被写体/顔自動合わせ: A)"));
+        let _ = AppendMenuW(menu, MF_STRING, 1008, w!("フィルムストリップ表示切替 (T)"));
+        let _ = AppendMenuW(menu, MF_STRING, 1009, w!("壁紙プリセット切替 (P)"));
+        let _ = AppendMenuW(menu, MF_STRING, 1010, w!("現在の構成をプリセット保存 (Ctrl+P)"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
         let _ = AppendMenuW(menu, MF_STRING, 1003, w!("除外一覧"));
         let _ = AppendMenuW(menu, MF_STRING, 1004, w!("設定"));
@@ -4280,10 +4789,39 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
                 state.rebuild_layout(true, true);
             }
             1006 => state.random_image(),
+            1007 => state.apply_smart_pan_current_frame(),
+            1008 => {
+                state.show_filmstrip = !state.show_filmstrip;
+            }
+            1009 => state.load_next_preset(),
+            1010 => state.save_current_as_preset(),
             1003 => state.modal_dialog = ModalDialog::ExcludeList,
             1004 => state.modal_dialog = ModalDialog::Settings,
             1005 => state.modal_dialog = ModalDialog::Shortcuts,
+            c if (2000..2010).contains(&c) => {
+                let idx = (c - 2000) as usize;
+                if let Some(folder) = state.config.library.recent_folders.get(idx).cloned() {
+                    state.open_path(Path::new(&folder));
+                }
+            }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filmstrip_layout() {
+        let (strip_y, strip_h, item_w, start, end) =
+            get_filmstrip_layout(1000, 800, 5, 20, 96);
+        assert_eq!(strip_h, 92);
+        assert_eq!(strip_y, 800 - 92);
+        assert!(item_w > 0);
+        assert!(start <= 5);
+        assert!(end > 5);
+        assert!(end <= 20);
     }
 }
