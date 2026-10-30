@@ -22,6 +22,7 @@ pub enum ModalDialog {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BarButtonId {
     Open,
+    Sidebar,
     ViewMode,
     Monitor,
     Split,

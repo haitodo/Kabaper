@@ -1,8 +1,12 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::core::*;
 
+use crate::catalog::Catalog;
 use crate::ui::types::{BarButtonId, FrameOverlayButtonId};
 
 pub fn get_window_dpi(hwnd: HWND) -> u32 {
@@ -26,6 +30,36 @@ pub fn get_bar_height(dpi: u32) -> i32 {
     scale_by_dpi(45, dpi)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanvasLayout {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+#[inline]
+pub fn get_sidebar_width(dpi: u32) -> i32 {
+    scale_by_dpi(280, dpi)
+}
+
+pub fn get_canvas_layout(
+    win_w: i32,
+    win_h: i32,
+    bar_h: i32,
+    show_sidebar: bool,
+    show_filmstrip: bool,
+    dpi: u32,
+) -> CanvasLayout {
+    let sidebar_w = if show_sidebar { get_sidebar_width(dpi) } else { 0 };
+    let strip_h = if show_filmstrip { scale_by_dpi(92, dpi) } else { 0 };
+    let x = sidebar_w;
+    let y = bar_h;
+    let w = (win_w - sidebar_w).max(1);
+    let h = (win_h - bar_h - strip_h).max(1);
+    CanvasLayout { x, y, w, h }
+}
+
 pub fn get_operation_bar_buttons(dpi: u32) -> Vec<(BarButtonId, RECT)> {
     let pad_x = scale_by_dpi(10, dpi);
     let gap = scale_by_dpi(6, dpi);
@@ -34,6 +68,7 @@ pub fn get_operation_bar_buttons(dpi: u32) -> Vec<(BarButtonId, RECT)> {
 
     let defs = [
         (BarButtonId::Open, 76),
+        (BarButtonId::Sidebar, 76),
         (BarButtonId::ViewMode, 68),
         (BarButtonId::Monitor, 78),
         (BarButtonId::Split, 88),
@@ -249,5 +284,210 @@ pub unsafe fn create_gui_font(hwnd: HWND, size_pt: i32, weight: i32) -> HFONT {
             font = HFONT(GetStockObject(DEFAULT_GUI_FONT).0);
         }
         font
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebarRowKind {
+    FolderHeader {
+        folder_path: PathBuf,
+        display_name: String,
+        item_count: usize,
+        is_collapsed: bool,
+    },
+    FileItem {
+        catalog_index: usize,
+        filename: String,
+        is_selected: bool,
+        is_pinned: bool,
+        is_excluded: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct SidebarRowLayout {
+    pub kind: SidebarRowKind,
+    pub rect: RECT,
+}
+
+#[derive(Debug, Clone)]
+pub struct SidebarLayout {
+    pub bounds: RECT,
+    pub header_rect: RECT,
+    pub close_btn_rect: RECT,
+    pub list_rect: RECT,
+    pub rows: Vec<SidebarRowLayout>,
+    pub total_content_height: i32,
+    pub scrollbar_rect: Option<RECT>,
+    pub scrollbar_thumb_rect: Option<RECT>,
+}
+
+pub fn compute_sidebar_layout(
+    catalog: &Catalog,
+    selected_index: Option<usize>,
+    pinned_paths: &HashSet<PathBuf>,
+    collapsed_folders: &HashSet<PathBuf>,
+    scroll_offset: i32,
+    _win_w: i32,
+    win_h: i32,
+    bar_h: i32,
+    show_filmstrip: bool,
+    dpi: u32,
+) -> SidebarLayout {
+    let sidebar_w = get_sidebar_width(dpi);
+    let strip_h = if show_filmstrip { scale_by_dpi(92, dpi) } else { 0 };
+    let bounds = RECT {
+        left: 0,
+        top: bar_h,
+        right: sidebar_w,
+        bottom: win_h - strip_h,
+    };
+
+    let header_h = scale_by_dpi(38, dpi);
+    let header_rect = RECT {
+        left: 0,
+        top: bar_h,
+        right: sidebar_w,
+        bottom: bar_h + header_h,
+    };
+
+    let close_btn_size = scale_by_dpi(28, dpi);
+    let close_btn_rect = RECT {
+        left: sidebar_w - close_btn_size - scale_by_dpi(6, dpi),
+        top: bar_h + (header_h - close_btn_size) / 2,
+        right: sidebar_w - scale_by_dpi(6, dpi),
+        bottom: bar_h + (header_h + close_btn_size) / 2,
+    };
+
+    let list_rect = RECT {
+        left: 0,
+        top: header_rect.bottom,
+        right: sidebar_w,
+        bottom: bounds.bottom,
+    };
+    let list_h = (list_rect.bottom - list_rect.top).max(0);
+
+    let mut groups: Vec<(PathBuf, String, Vec<usize>)> = Vec::new();
+    let root_opt = &catalog.folder;
+
+    for (idx, item) in catalog.items.iter().enumerate() {
+        let parent = item.path.parent().unwrap_or(Path::new("")).to_path_buf();
+        if let Some(last_group) = groups.last_mut() {
+            if last_group.0 == parent {
+                last_group.2.push(idx);
+                continue;
+            }
+        }
+        let display_name = if let Some(root) = root_opt {
+            if &parent == root {
+                let name = root.file_name().and_then(|n| n.to_str()).unwrap_or("ルート");
+                format!("📁 {} (直下)", name)
+            } else if let Ok(rel) = parent.strip_prefix(root) {
+                format!("📁 {}", rel.to_string_lossy())
+            } else {
+                let name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("フォルダ");
+                format!("📁 {}", name)
+            }
+        } else {
+            let name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("フォルダ");
+            format!("📁 {}", name)
+        };
+        groups.push((parent, display_name, vec![idx]));
+    }
+
+    let folder_h = scale_by_dpi(28, dpi);
+    let item_h = scale_by_dpi(44, dpi);
+
+    let mut y_accum = 0;
+    let mut rows = Vec::new();
+
+    for (folder_path, display_name, item_indices) in groups {
+        let item_count = item_indices.len();
+        let is_collapsed = collapsed_folders.contains(&folder_path);
+
+        let row_top = list_rect.top + y_accum - scroll_offset;
+        let row_bottom = row_top + folder_h;
+        if row_bottom >= list_rect.top && row_top <= list_rect.bottom {
+            rows.push(SidebarRowLayout {
+                kind: SidebarRowKind::FolderHeader {
+                    folder_path: folder_path.clone(),
+                    display_name,
+                    item_count,
+                    is_collapsed,
+                },
+                rect: RECT {
+                    left: list_rect.left,
+                    top: row_top,
+                    right: list_rect.right,
+                    bottom: row_bottom,
+                },
+            });
+        }
+        y_accum += folder_h;
+
+        if !is_collapsed {
+            for idx in item_indices {
+                let item = &catalog.items[idx];
+                let item_top = list_rect.top + y_accum - scroll_offset;
+                let item_bottom = item_top + item_h;
+                if item_bottom >= list_rect.top && item_top <= list_rect.bottom {
+                    let is_selected = selected_index == Some(idx);
+                    let is_pinned = pinned_paths.contains(&item.path);
+                    rows.push(SidebarRowLayout {
+                        kind: SidebarRowKind::FileItem {
+                            catalog_index: idx,
+                            filename: item.filename.clone(),
+                            is_selected,
+                            is_pinned,
+                            is_excluded: item.is_excluded,
+                        },
+                        rect: RECT {
+                            left: list_rect.left,
+                            top: item_top,
+                            right: list_rect.right,
+                            bottom: item_bottom,
+                        },
+                    });
+                }
+                y_accum += item_h;
+            }
+        }
+    }
+
+    let total_content_height = y_accum;
+    let (scrollbar_rect, scrollbar_thumb_rect) = if total_content_height > list_h && list_h > 0 {
+        let bar_w = scale_by_dpi(6, dpi);
+        let s_rect = RECT {
+            left: list_rect.right - bar_w - scale_by_dpi(2, dpi),
+            top: list_rect.top + scale_by_dpi(2, dpi),
+            right: list_rect.right - scale_by_dpi(2, dpi),
+            bottom: list_rect.bottom - scale_by_dpi(2, dpi),
+        };
+        let bar_usable_h = (s_rect.bottom - s_rect.top).max(1);
+        let thumb_h = ((bar_usable_h as i64 * list_h as i64) / total_content_height as i64) as i32;
+        let thumb_h = thumb_h.clamp(scale_by_dpi(20, dpi), bar_usable_h);
+        let max_scroll = (total_content_height - list_h).max(1);
+        let thumb_top = s_rect.top
+            + ((scroll_offset as i64 * (bar_usable_h - thumb_h) as i64) / max_scroll as i64) as i32;
+        let thumb_rect = RECT {
+            left: s_rect.left,
+            top: thumb_top,
+            right: s_rect.right,
+            bottom: thumb_top + thumb_h,
+        };
+        (Some(s_rect), Some(thumb_rect))
+    } else {
+        (None, None)
+    };
+
+    SidebarLayout {
+        bounds,
+        header_rect,
+        close_btn_rect,
+        list_rect,
+        rows,
+        total_content_height,
+        scrollbar_rect,
+        scrollbar_thumb_rect,
     }
 }

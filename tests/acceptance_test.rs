@@ -1135,3 +1135,73 @@ fn test_acceptance_current_selected_image_path() {
 
     let _ = fs::remove_dir_all(&temp);
 }
+
+#[test]
+fn test_acceptance_sidebar_operations() {
+    let temp = std::env::temp_dir().join(format!("kabaper_sidebar_test_{}", std::process::id()));
+    let _ = fs::create_dir_all(&temp);
+
+    let storage = kabaper::store::Storage::init_with_dir(temp.clone()).unwrap();
+    let initial_config = kabaper::store::AppConfig::default();
+    let mut state = kabaper::ui::AppState::new(storage, initial_config, None).unwrap();
+
+    let sub = temp.join("subfolder");
+    let _ = fs::create_dir_all(&sub);
+
+    // Initial state
+    assert!(!state.show_sidebar);
+    assert_eq!(state.sidebar_scroll_offset, 0);
+
+    // Toggle sidebar on
+    state.toggle_sidebar();
+    assert!(state.show_sidebar);
+
+    // Populate catalog with items
+    state.catalog.folder = Some(temp.clone());
+    state.catalog.items = vec![
+        kabaper::catalog::CatalogItem {
+            path: temp.join("a.jpg"),
+            filename: "a.jpg".into(),
+            is_excluded: false,
+            failure_reason: None,
+        },
+        kabaper::catalog::CatalogItem {
+            path: sub.join("b.jpg"),
+            filename: "b.jpg".into(),
+            is_excluded: false,
+            failure_reason: None,
+        },
+    ];
+    state.catalog.current_index = Some(0);
+    state.view_mode = kabaper::ui::ViewMode::Normal;
+
+    // Select index 1 via sidebar
+    state.select_image_by_index(1);
+    assert_eq!(state.catalog.current_index, Some(1));
+
+    // Collapse subfolder
+    state.toggle_folder_collapse(&sub);
+    assert!(state.collapsed_folders.contains(&sub));
+
+    // Next image back to 0 (root folder)
+    state.next_image();
+    assert_eq!(state.catalog.current_index, Some(0));
+
+    // Select b.jpg (inside subfolder) -> ensure_current_item_visible_in_sidebar auto-expands it
+    state.select_image_by_index(1);
+    assert!(!state.collapsed_folders.contains(&sub));
+
+    // Test scroll_sidebar clamping
+    state.scroll_sidebar(-100, 200, 500); // Scroll down
+    assert_eq!(state.sidebar_scroll_offset, 100);
+    state.scroll_sidebar(-1000, 200, 500); // Exceed max (500 - 200 = 300)
+    assert_eq!(state.sidebar_scroll_offset, 300);
+    state.scroll_sidebar(500, 200, 500); // Scroll up past 0
+    assert_eq!(state.sidebar_scroll_offset, 0);
+
+    // Toggle sidebar off
+    state.toggle_sidebar();
+    assert!(!state.show_sidebar);
+
+    let _ = fs::remove_dir_all(&temp);
+}

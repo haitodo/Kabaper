@@ -66,6 +66,9 @@ pub struct AppState {
     pub recent_wallpapers: HashMap<String, Vec<PathBuf>>,
     pub selected_preset_idx: usize,
     pub show_filmstrip: bool,
+    pub show_sidebar: bool,
+    pub sidebar_scroll_offset: i32,
+    pub collapsed_folders: HashSet<PathBuf>,
 }
 
 impl AppState {
@@ -161,6 +164,9 @@ impl AppState {
             recent_wallpapers: HashMap::new(),
             selected_preset_idx: 0,
             show_filmstrip: false,
+            show_sidebar: false,
+            sidebar_scroll_offset: 0,
+            collapsed_folders: HashSet::new(),
         };
 
         state.show_info = state.config.window.show_info;
@@ -620,6 +626,7 @@ impl AppState {
                 self.rebuild_layout(false, false);
             }
         }
+        self.ensure_current_item_visible_in_sidebar();
     }
 
     pub fn prev_image(&mut self) {
@@ -676,6 +683,7 @@ impl AppState {
                 self.rebuild_layout(false, false);
             }
         }
+        self.ensure_current_item_visible_in_sidebar();
     }
 
     pub fn first_image(&mut self) {
@@ -728,6 +736,7 @@ impl AppState {
                 }
             }
         }
+        self.ensure_current_item_visible_in_sidebar();
     }
 
     pub fn last_image(&mut self) {
@@ -781,6 +790,7 @@ impl AppState {
                 }
             }
         }
+        self.ensure_current_item_visible_in_sidebar();
     }
 
     pub fn random_image(&mut self) {
@@ -874,6 +884,7 @@ impl AppState {
                 self.set_osd("変更可能な別候補がありません".to_string(), 2, false);
             }
         }
+        self.ensure_current_item_visible_in_sidebar();
     }
 
     pub fn switch_view_mode(&mut self) {
@@ -1592,6 +1603,142 @@ impl AppState {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             self.fullscreen = true;
             self.bar_visible = false;
+        }
+    }
+
+    pub fn toggle_sidebar(&mut self) {
+        self.show_sidebar = !self.show_sidebar;
+        if self.show_sidebar {
+            self.ensure_current_item_visible_in_sidebar();
+        }
+        self.set_osd(
+            format!(
+                "サイドバー: {}",
+                if self.show_sidebar {
+                    "表示"
+                } else {
+                    "非表示"
+                }
+            ),
+            2,
+            false,
+        );
+    }
+
+    pub fn toggle_folder_collapse(&mut self, folder: &Path) {
+        let pb = folder.to_path_buf();
+        if self.collapsed_folders.contains(&pb) {
+            self.collapsed_folders.remove(&pb);
+        } else {
+            self.collapsed_folders.insert(pb);
+        }
+    }
+
+    pub fn scroll_sidebar(&mut self, delta: i32, list_h: i32, total_h: i32) {
+        let max_scroll = (total_h - list_h).max(0);
+        self.sidebar_scroll_offset = (self.sidebar_scroll_offset - delta).clamp(0, max_scroll);
+    }
+
+    pub fn select_image_by_index(&mut self, target_idx: usize) {
+        if target_idx >= self.catalog.items.len() {
+            return;
+        }
+        if self.view_mode == ViewMode::Normal {
+            self.catalog.select_by_index(target_idx);
+            self.reset_normal_zoom();
+            if !self.has_pinned_frames() {
+                self.rebuild_layout(true, true);
+            } else {
+                self.ensure_current_image_loaded();
+            }
+        } else {
+            let next_path = self.catalog.items[target_idx].path.clone();
+            if let Ok(spec) = self.decoder.read_image_spec(&next_path) {
+                if self.selected_frame_idx < self.layout_frames.len() {
+                    self.layout_frames[self.selected_frame_idx].image = Some(spec);
+                    self.layout_frames[self.selected_frame_idx].pan = (0.5, 0.5);
+                    if self.selected_frame_idx == 0 {
+                        self.catalog.select_by_path(&next_path);
+                    }
+                    self.rebuild_layout(false, false);
+                }
+            }
+        }
+        self.ensure_current_item_visible_in_sidebar();
+    }
+
+    pub fn ensure_current_item_visible_in_sidebar(&mut self) {
+        let Some(cur_idx) = self.catalog.current_index else {
+            return;
+        };
+        let Some(cur_item) = self.catalog.items.get(cur_idx) else {
+            return;
+        };
+
+        // If parent folder is collapsed, expand it
+        if let Some(parent) = cur_item.path.parent() {
+            self.collapsed_folders.remove(parent);
+        }
+
+        let dpi = if !self.hwnd.0.is_null() {
+            crate::ui::get_window_dpi(self.hwnd)
+        } else {
+            96
+        };
+
+        let folder_h = crate::ui::scale_by_dpi(28, dpi);
+        let item_h = crate::ui::scale_by_dpi(44, dpi);
+
+        let mut groups: Vec<(PathBuf, Vec<usize>)> = Vec::new();
+        for (idx, it) in self.catalog.items.iter().enumerate() {
+            let parent = it.path.parent().unwrap_or(Path::new("")).to_path_buf();
+            if let Some(last) = groups.last_mut() {
+                if last.0 == parent {
+                    last.1.push(idx);
+                    continue;
+                }
+            }
+            groups.push((parent, vec![idx]));
+        }
+
+        let mut y_accum = 0;
+        let mut target_y = None;
+
+        for (folder_path, item_indices) in groups {
+            let is_collapsed = self.collapsed_folders.contains(&folder_path);
+            y_accum += folder_h;
+            if !is_collapsed {
+                for idx in item_indices {
+                    if idx == cur_idx {
+                        target_y = Some(y_accum);
+                        break;
+                    }
+                    y_accum += item_h;
+                }
+                if target_y.is_some() {
+                    break;
+                }
+            }
+        }
+
+        if let Some(ty) = target_y {
+            let list_h = if !self.hwnd.0.is_null() {
+                let mut cr = RECT::default();
+                let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::GetClientRect(self.hwnd, &mut cr) };
+                let bar_h = if self.bar_visible { crate::ui::get_bar_height(dpi) } else { 0 };
+                let strip_h = if self.show_filmstrip { crate::ui::scale_by_dpi(92, dpi) } else { 0 };
+                let header_h = crate::ui::scale_by_dpi(38, dpi);
+                (cr.bottom - bar_h - strip_h - header_h).max(100)
+            } else {
+                400
+            };
+
+            let padding = crate::ui::scale_by_dpi(40, dpi);
+            if ty < self.sidebar_scroll_offset {
+                self.sidebar_scroll_offset = ty.saturating_sub(padding);
+            } else if ty + item_h > self.sidebar_scroll_offset + list_h {
+                self.sidebar_scroll_offset = (ty + item_h + padding - list_h).max(0);
+            }
         }
     }
 }

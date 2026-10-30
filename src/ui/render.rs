@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -160,8 +161,18 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
         } else {
             0
         };
-        let canvas_h = (win_h - bar_h).max(1);
-        let canvas_w = win_w;
+        let canvas_layout = get_canvas_layout(
+            win_w,
+            win_h,
+            bar_h,
+            state.show_sidebar,
+            state.show_filmstrip,
+            dpi,
+        );
+        let canvas_x = canvas_layout.x;
+        let canvas_y = canvas_layout.y;
+        let canvas_w = canvas_layout.w;
+        let canvas_h = canvas_layout.h;
 
         // Render Canvas
         if state.view_mode == ViewMode::Composite {
@@ -174,8 +185,8 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                 let fit_scale = (canvas_w as f64 / mw).min(canvas_h as f64 / mh);
                 let dw = (mw * fit_scale).round() as i32;
                 let dh = (mh * fit_scale).round() as i32;
-                let ox = (canvas_w - dw) / 2;
-                let oy = bar_h + (canvas_h - dh) / 2;
+                let ox = canvas_x + (canvas_w - dw) / 2;
+                let oy = canvas_y + (canvas_h - dh) / 2;
 
                 let mut bi = BITMAPINFO::default();
                 bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -353,8 +364,8 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                     let pan_x = state.normal_pan_offset.0.clamp(-max_pan_x, max_pan_x);
                     let pan_y = state.normal_pan_offset.1.clamp(-max_pan_y, max_pan_y);
 
-                    let ox = (canvas_w - dw) / 2 + pan_x.round() as i32;
-                    let oy = bar_h + (canvas_h - dh) / 2 + pan_y.round() as i32;
+                    let ox = canvas_x + (canvas_w - dw) / 2 + pan_x.round() as i32;
+                    let oy = canvas_y + (canvas_h - dh) / 2 + pan_y.round() as i32;
 
                     let mut bi = BITMAPINFO::default();
                     bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -365,7 +376,13 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                     bi.bmiHeader.biCompression = BI_RGB.0;
 
                     let _ = SetStretchBltMode(mem_dc, HALFTONE);
-                    let _ = IntersectClipRect(mem_dc, 0, bar_h, canvas_w, bar_h + canvas_h);
+                    let _ = IntersectClipRect(
+                        mem_dc,
+                        canvas_x,
+                        canvas_y,
+                        canvas_x + canvas_w,
+                        canvas_y + canvas_h,
+                    );
                     let _ = StretchDIBits(
                         mem_dc,
                         ox,
@@ -401,6 +418,11 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
         // Render Info Display
         if state.show_info {
             draw_info_overlay(state, mem_dc, win_h, dpi);
+        }
+
+        // Render Sidebar
+        if state.show_sidebar {
+            draw_sidebar(state, mem_dc, win_w, win_h, bar_h, dpi);
         }
 
         // Render Filmstrip
@@ -478,6 +500,23 @@ fn draw_operation_bar(state: &AppState, hdc: HDC, width: i32, dpi: u32) {
                         h,
                         "開く",
                         ModernButtonStyle::SecondaryTonal,
+                        radius,
+                    );
+                }
+                BarButtonId::Sidebar => {
+                    let style = if state.show_sidebar {
+                        ModernButtonStyle::SegmentActive
+                    } else {
+                        ModernButtonStyle::SecondaryTonal
+                    };
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        "一覧",
+                        style,
                         radius,
                     );
                 }
@@ -1470,7 +1509,7 @@ fn draw_exclude_list_modal(hdc: HDC, state: &AppState, win_w: i32, win_h: i32, d
 fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
     unsafe {
         let box_w = scale_by_dpi(480, dpi);
-        let box_h = scale_by_dpi(620, dpi);
+        let box_h = scale_by_dpi(640, dpi);
         let bx = (win_w - box_w) / 2;
         let by = (win_h - box_h) / 2;
         let modal_r = RECT {
@@ -1523,6 +1562,7 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
             ("左ドラッグ / Shift+矢印", "パン調整"),
             ("C", "パン位置リセット"),
             ("A", "スマートパン (被写体/顔自動合わせ)"),
+            ("B", "サイドバー (ファイル一覧) 切替"),
             ("T", "フィルムストリップ表示切替"),
             ("L / Shift+L", "分割モード切替"),
             ("Ctrl+ホイール / + / -", "拡大率変更 / ズーム"),
@@ -1568,7 +1608,7 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
         let close_w = scale_by_dpi(120, dpi);
         let close_h = scale_by_dpi(34, dpi);
         let close_x = bx + (box_w - close_w) / 2;
-        let close_y = by + scale_by_dpi(565, dpi);
+        let close_y = by + scale_by_dpi(585, dpi);
         draw_modern_button(
             hdc,
             close_x,
@@ -1665,6 +1705,292 @@ pub(crate) unsafe extern "system" fn overlay_wnd_proc(
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+}
+
+fn draw_sidebar(state: &AppState, hdc: HDC, win_w: i32, win_h: i32, bar_h: i32, dpi: u32) {
+    unsafe {
+        let pinned_paths: HashSet<PathBuf> = state
+            .layout_frames
+            .iter()
+            .filter(|f| f.pinned)
+            .filter_map(|f| f.image.as_ref())
+            .map(|img| PathBuf::from(&img.id.0))
+            .collect();
+
+        let layout = compute_sidebar_layout(
+            &state.catalog,
+            state.catalog.current_index,
+            &pinned_paths,
+            &state.collapsed_folders,
+            state.sidebar_scroll_offset,
+            win_w,
+            win_h,
+            bar_h,
+            state.show_filmstrip,
+            dpi,
+        );
+
+        // Sidebar background
+        let bg_brush = CreateSolidBrush(M3_SURFACE_BAR);
+        let _ = FillRect(hdc, &layout.bounds, bg_brush);
+        let _ = DeleteObject(bg_brush.into());
+
+        // Right vertical border
+        let border_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
+        let line_r = RECT {
+            left: layout.bounds.right - 1,
+            top: layout.bounds.top,
+            right: layout.bounds.right,
+            bottom: layout.bounds.bottom,
+        };
+        let _ = FillRect(hdc, &line_r, border_brush);
+
+        // Header background & border
+        let hdr_line_r = RECT {
+            left: layout.header_rect.left,
+            top: layout.header_rect.bottom - 1,
+            right: layout.header_rect.right,
+            bottom: layout.header_rect.bottom,
+        };
+        let _ = FillRect(hdc, &hdr_line_r, border_brush);
+        let _ = DeleteObject(border_brush.into());
+
+        // Header Title
+        let total_items = state.catalog.items.len();
+        let header_txt = format!("ファイル一覧 ({}枚)", total_items);
+        let mut title_r = RECT {
+            left: layout.header_rect.left + scale_by_dpi(14, dpi),
+            top: layout.header_rect.top,
+            right: layout.close_btn_rect.left - scale_by_dpi(6, dpi),
+            bottom: layout.header_rect.bottom,
+        };
+        let _ = SetBkMode(hdc, TRANSPARENT);
+        let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
+
+        let bold_font = create_gui_font(state.hwnd, 10, 600);
+        let old_font = SelectObject(hdc, bold_font.into());
+        draw_text(
+            hdc,
+            &header_txt,
+            &mut title_r,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+
+        // Close button (✕)
+        let mut close_r = layout.close_btn_rect;
+        let _ = SetTextColor(hdc, M3_TEXT_MUTED);
+        draw_text(
+            hdc,
+            "✕",
+            &mut close_r,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        // Restore normal font for list
+        let _ = SelectObject(hdc, old_font);
+        let _ = DeleteObject(bold_font.into());
+
+        // Clip list area so scrolling rows don't bleed into header or filmstrip
+        let _ = IntersectClipRect(
+            hdc,
+            layout.list_rect.left,
+            layout.list_rect.top,
+            layout.list_rect.right,
+            layout.list_rect.bottom,
+        );
+
+        let thumb_size = scale_by_dpi(34, dpi);
+        let pad_x = scale_by_dpi(8, dpi);
+
+        for row in &layout.rows {
+            match &row.kind {
+                SidebarRowKind::FolderHeader {
+                    display_name,
+                    item_count,
+                    is_collapsed,
+                    ..
+                } => {
+                    let folder_bg = CreateSolidBrush(M3_SURFACE_CARD);
+                    let _ = FillRect(hdc, &row.rect, folder_bg);
+                    let _ = DeleteObject(folder_bg.into());
+
+                    let sep_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
+                    let sep_r = RECT {
+                        left: row.rect.left,
+                        top: row.rect.bottom - 1,
+                        right: row.rect.right,
+                        bottom: row.rect.bottom,
+                    };
+                    let _ = FillRect(hdc, &sep_r, sep_brush);
+                    let _ = DeleteObject(sep_brush.into());
+
+                    let arrow = if *is_collapsed { "▶ " } else { "▼ " };
+                    let folder_label = format!("{}{} ({})", arrow, display_name, item_count);
+                    let mut text_r = RECT {
+                        left: row.rect.left + pad_x,
+                        top: row.rect.top,
+                        right: row.rect.right - pad_x,
+                        bottom: row.rect.bottom,
+                    };
+                    let _ = SetTextColor(hdc, M3_PRIMARY_ACCENT);
+                    draw_text(
+                        hdc,
+                        &folder_label,
+                        &mut text_r,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                    );
+                }
+                SidebarRowKind::FileItem {
+                    catalog_index,
+                    filename,
+                    is_selected,
+                    is_pinned,
+                    is_excluded,
+                } => {
+                    if *is_selected {
+                        let sel_brush = CreateSolidBrush(M3_SURFACE_HIGH);
+                        let _ = FillRect(hdc, &row.rect, sel_brush);
+                        let _ = DeleteObject(sel_brush.into());
+
+                        let ind_brush = CreateSolidBrush(M3_PRIMARY_BLUE);
+                        let ind_r = RECT {
+                            left: row.rect.left,
+                            top: row.rect.top,
+                            right: row.rect.left + scale_by_dpi(3, dpi),
+                            bottom: row.rect.bottom,
+                        };
+                        let _ = FillRect(hdc, &ind_r, ind_brush);
+                        let _ = DeleteObject(ind_brush.into());
+                    }
+
+                    let thumb_x = row.rect.left + pad_x + scale_by_dpi(4, dpi);
+                    let thumb_y = row.rect.top + (row.rect.bottom - row.rect.top - thumb_size) / 2;
+                    let thumb_r = RECT {
+                        left: thumb_x,
+                        top: thumb_y,
+                        right: thumb_x + thumb_size,
+                        bottom: thumb_y + thumb_size,
+                    };
+
+                    let card_brush = CreateSolidBrush(if *is_selected {
+                        COLORREF(0x003A3A3A)
+                    } else {
+                        COLORREF(0x0022252A)
+                    });
+                    let _ = FillRect(hdc, &thumb_r, card_brush);
+                    let _ = DeleteObject(card_brush.into());
+
+                    let item = &state.catalog.items[*catalog_index];
+                    let img_id = ImageId(item.path.to_string_lossy().to_string());
+                    if let Some(dec) = state.cached_images.get(&img_id) {
+                        let scale = (thumb_size as f64 / dec.width as f64)
+                            .min(thumb_size as f64 / dec.height as f64);
+                        let dw = (dec.width as f64 * scale).round() as i32;
+                        let dh = (dec.height as f64 * scale).round() as i32;
+                        let ox = thumb_x + (thumb_size - dw) / 2;
+                        let oy = thumb_y + (thumb_size - dh) / 2;
+
+                        let mut bi = BITMAPINFO::default();
+                        bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+                        bi.bmiHeader.biWidth = dec.width as i32;
+                        bi.bmiHeader.biHeight = -(dec.height as i32);
+                        bi.bmiHeader.biPlanes = 1;
+                        bi.bmiHeader.biBitCount = 32;
+                        bi.bmiHeader.biCompression = BI_RGB.0;
+
+                        let _ = SetStretchBltMode(hdc, HALFTONE);
+                        let _ = StretchDIBits(
+                            hdc,
+                            ox,
+                            oy,
+                            dw,
+                            dh,
+                            0,
+                            0,
+                            dec.width as i32,
+                            dec.height as i32,
+                            Some(dec.pixels.as_ptr() as *const _),
+                            &bi,
+                            DIB_RGB_COLORS,
+                            SRCCOPY,
+                        );
+                    }
+
+                    let outline_color = if *is_selected {
+                        COLORREF(0x00FF9933)
+                    } else if *is_excluded {
+                        COLORREF(0x003333FF)
+                    } else {
+                        M3_OUTLINE_VARIANT
+                    };
+                    let outline_brush = CreateSolidBrush(outline_color);
+                    let _ = FrameRect(hdc, &thumb_r, outline_brush);
+                    let _ = DeleteObject(outline_brush.into());
+
+                    let badge_reserve = if *is_pinned || *is_excluded {
+                        scale_by_dpi(28, dpi)
+                    } else {
+                        scale_by_dpi(8, dpi)
+                    };
+
+                    let text_x = thumb_x + thumb_size + scale_by_dpi(8, dpi);
+                    let mut file_r = RECT {
+                        left: text_x,
+                        top: row.rect.top,
+                        right: row.rect.right - badge_reserve,
+                        bottom: row.rect.bottom,
+                    };
+
+                    let text_color = if *is_selected {
+                        M3_TEXT_PRIMARY
+                    } else if *is_excluded {
+                        M3_TEXT_MUTED
+                    } else {
+                        M3_TEXT_SECONDARY
+                    };
+                    let _ = SetTextColor(hdc, text_color);
+                    draw_text(
+                        hdc,
+                        filename,
+                        &mut file_r,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                    );
+
+                    if *is_pinned {
+                        let mut badge_r = RECT {
+                            left: row.rect.right - scale_by_dpi(26, dpi),
+                            top: row.rect.top,
+                            right: row.rect.right - scale_by_dpi(4, dpi),
+                            bottom: row.rect.bottom,
+                        };
+                        let _ = SetTextColor(hdc, M3_CYAN_PINNED);
+                        draw_text(hdc, "📌", &mut badge_r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    } else if *is_excluded {
+                        let mut badge_r = RECT {
+                            left: row.rect.right - scale_by_dpi(26, dpi),
+                            top: row.rect.top,
+                            right: row.rect.right - scale_by_dpi(4, dpi),
+                            bottom: row.rect.bottom,
+                        };
+                        let _ = SetTextColor(hdc, COLORREF(0x005555FF));
+                        draw_text(hdc, "🚫", &mut badge_r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    }
+                }
+            }
+        }
+
+        let _ = SelectClipRgn(hdc, None);
+
+        if let (Some(bar_r), Some(thumb_r)) = (layout.scrollbar_rect, layout.scrollbar_thumb_rect) {
+            let bar_brush = CreateSolidBrush(COLORREF(0x00202327));
+            let _ = FillRect(hdc, &bar_r, bar_brush);
+            let _ = DeleteObject(bar_brush.into());
+
+            let thumb_brush = CreateSolidBrush(M3_OUTLINE);
+            let _ = FillRect(hdc, &thumb_r, thumb_brush);
+            let _ = DeleteObject(thumb_brush.into());
         }
     }
 }
