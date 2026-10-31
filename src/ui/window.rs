@@ -18,6 +18,9 @@ use crate::ui::layout_calc::*;
 use crate::ui::render::*;
 use crate::ui::state::AppState;
 use crate::ui::types::*;
+
+const WM_MOUSELEAVE: u32 = 0x02A3;
+
 // Global pointer to AppState during Win32 event loop
 static mut APP_STATE_PTR: *mut AppState = std::ptr::null_mut();
 
@@ -234,6 +237,48 @@ unsafe extern "system" fn wnd_proc(
 
         match msg {
             WM_TIMER => {
+                if wparam.0 == 2 {
+                    if state.show_sidebar {
+                        let mut cr = RECT::default();
+                        let _ = GetClientRect(hwnd, &mut cr);
+                        let dpi = get_window_dpi(hwnd);
+                        let bar_h = if state.bar_visible { get_bar_height(dpi) } else { 0 };
+                        let _strip_h = if state.show_filmstrip { scale_by_dpi(92, dpi) } else { 0 };
+                        let pinned_paths: HashSet<PathBuf> = state
+                            .layout_frames
+                            .iter()
+                            .filter(|f| f.pinned)
+                            .filter_map(|f| f.image.as_ref())
+                            .map(|img| PathBuf::from(&img.id.0))
+                            .collect();
+                        let layout = compute_sidebar_layout(
+                            &state.catalog,
+                            state.current_selected_catalog_index(),
+                            &pinned_paths,
+                            &state.collapsed_folders,
+                            state.sidebar_scroll_offset,
+                            cr.right,
+                            cr.bottom,
+                            bar_h,
+                            state.show_filmstrip,
+                            state.view_mode,
+                            state.layout_frames.len(),
+                            state.selected_frame_idx,
+                            dpi,
+                        );
+                        let list_h = (layout.list_rect.bottom - layout.list_rect.top).max(0);
+                        let animating = state.step_sidebar_scroll_animation(list_h, layout.total_content_height);
+                        if !animating {
+                            let _ = KillTimer(Some(hwnd), 2);
+                        }
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    } else {
+                        let _ = KillTimer(Some(hwnd), 2);
+                        state.sidebar_scroll_animating = false;
+                    }
+                    return LRESULT(0);
+                }
+
                 state.poll_prefetch_results();
 
                 // Check OSD expiry
@@ -293,6 +338,92 @@ unsafe extern "system" fn wnd_proc(
                 state.last_interaction = Instant::now();
                 let x = (lparam.0 & 0xffff) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tme);
+
+                if state.sidebar_scroll_dragging {
+                    let mut cr = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut cr);
+                    let dpi = get_window_dpi(hwnd);
+                    let bar_h = if state.bar_visible { get_bar_height(dpi) } else { 0 };
+                    let pinned_paths: HashSet<PathBuf> = state
+                        .layout_frames
+                        .iter()
+                        .filter(|f| f.pinned)
+                        .filter_map(|f| f.image.as_ref())
+                        .map(|img| PathBuf::from(&img.id.0))
+                        .collect();
+                    let layout = compute_sidebar_layout(
+                        &state.catalog,
+                        state.current_selected_catalog_index(),
+                        &pinned_paths,
+                        &state.collapsed_folders,
+                        state.sidebar_scroll_offset,
+                        cr.right,
+                        cr.bottom,
+                        bar_h,
+                        state.show_filmstrip,
+                        state.view_mode,
+                        state.layout_frames.len(),
+                        state.selected_frame_idx,
+                        dpi,
+                    );
+                    let list_h = (layout.list_rect.bottom - layout.list_rect.top).max(0);
+                    if let (Some(s_rect), Some(t_rect)) = (layout.scrollbar_rect, layout.scrollbar_thumb_rect) {
+                        let thumb_h = t_rect.bottom - t_rect.top;
+                        state.drag_sidebar_scrollbar(y, s_rect, thumb_h, list_h, layout.total_content_height);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                    return LRESULT(0);
+                }
+
+                // Check scrollbar hover state
+                let dpi = get_window_dpi(hwnd);
+                let sidebar_w = if state.show_sidebar { get_sidebar_width(dpi) } else { 0 };
+                let bar_h = if state.bar_visible { get_bar_height(dpi) } else { 0 };
+                let is_hovered = if state.show_sidebar && x < sidebar_w && y >= bar_h {
+                    let mut cr = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut cr);
+                    let pinned_paths: HashSet<PathBuf> = state
+                        .layout_frames
+                        .iter()
+                        .filter(|f| f.pinned)
+                        .filter_map(|f| f.image.as_ref())
+                        .map(|img| PathBuf::from(&img.id.0))
+                        .collect();
+                    let layout = compute_sidebar_layout(
+                        &state.catalog,
+                        state.current_selected_catalog_index(),
+                        &pinned_paths,
+                        &state.collapsed_folders,
+                        state.sidebar_scroll_offset,
+                        cr.right,
+                        cr.bottom,
+                        bar_h,
+                        state.show_filmstrip,
+                        state.view_mode,
+                        state.layout_frames.len(),
+                        state.selected_frame_idx,
+                        dpi,
+                    );
+                    if let Some(s_rect) = layout.scrollbar_rect {
+                        is_in_scrollbar_hit_area(x, y, s_rect, layout.list_rect, dpi)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if state.sidebar_scrollbar_hovered != is_hovered {
+                    state.sidebar_scrollbar_hovered = is_hovered;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
 
                 if state.fullscreen && !state.bar_visible && y < 50 {
                     state.bar_visible = true;
@@ -420,9 +551,13 @@ unsafe extern "system" fn wnd_proc(
                     let sidebar_w = get_sidebar_width(dpi);
                     let strip_h = if state.show_filmstrip { scale_by_dpi(92, dpi) } else { 0 };
                     if x < sidebar_w && y >= bar_h && y < cr.bottom - strip_h {
-                        handle_sidebar_click(state, x, y, cr.right, cr.bottom, dpi);
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                        return LRESULT(0);
+                        if handle_sidebar_click(state, x, y, cr.right, cr.bottom, dpi) {
+                            if state.sidebar_scroll_dragging {
+                                let _ = SetCapture(hwnd);
+                            }
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                            return LRESULT(0);
+                        }
                     }
                 }
 
@@ -545,9 +680,33 @@ unsafe extern "system" fn wnd_proc(
             }
 
             WM_LBUTTONUP => {
+                if state.sidebar_scroll_dragging {
+                    state.stop_sidebar_scrollbar_drag();
+                    let _ = ReleaseCapture();
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
                 if state.is_panning {
                     state.is_panning = false;
                     let _ = ReleaseCapture();
+                }
+                LRESULT(0)
+            }
+
+            WM_CAPTURECHANGED => {
+                if state.sidebar_scroll_dragging {
+                    state.stop_sidebar_scrollbar_drag();
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                if state.is_panning {
+                    state.is_panning = false;
+                }
+                LRESULT(0)
+            }
+
+            WM_MOUSELEAVE => {
+                if state.sidebar_scrollbar_hovered {
+                    state.sidebar_scrollbar_hovered = false;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 LRESULT(0)
             }
@@ -614,8 +773,7 @@ unsafe extern "system" fn wnd_proc(
                         state.selected_frame_idx,
                         dpi,
                     );
-                    let scroll_amount = (delta as i32 / 120) * scale_by_dpi(60, dpi);
-                    state.scroll_sidebar(scroll_amount, list_h, layout.total_content_height);
+                    state.scroll_sidebar_wheel(delta as i32, list_h, layout.total_content_height, dpi);
                 } else if ctrl_down {
                     if state.view_mode == ViewMode::Normal {
                         if delta > 0 {
@@ -688,10 +846,98 @@ unsafe extern "system" fn wnd_proc(
                             state.prev_image();
                         }
                     }
-                    VK_PRIOR => state.jump_to_prev_folder(),
-                    VK_NEXT => state.jump_to_next_folder(),
-                    VK_HOME => state.first_image(),
-                    VK_END => state.last_image(),
+                    VK_PRIOR => {
+                        let mut pt = POINT::default();
+                        let _ = GetCursorPos(&mut pt);
+                        let _ = ScreenToClient(hwnd, &mut pt);
+                        let dpi = get_window_dpi(hwnd);
+                        let sidebar_w = if state.show_sidebar { get_sidebar_width(dpi) } else { 0 };
+                        let bar_h = if state.bar_visible { get_bar_height(dpi) } else { 0 };
+                        if state.show_sidebar && pt.x < sidebar_w && pt.y >= bar_h {
+                            let mut cr = RECT::default();
+                            let _ = GetClientRect(hwnd, &mut cr);
+                            let strip_h = if state.show_filmstrip { scale_by_dpi(92, dpi) } else { 0 };
+                            let header_h = scale_by_dpi(38, dpi);
+                            let list_h = (cr.bottom - bar_h - strip_h - header_h).max(0);
+                            let page_amount = (list_h * 9 / 10).max(50);
+                            state.scroll_sidebar(page_amount, list_h, state.sidebar_scroll_offset + page_amount * 2);
+                        } else {
+                            state.jump_to_prev_folder();
+                        }
+                    }
+                    VK_NEXT => {
+                        let mut pt = POINT::default();
+                        let _ = GetCursorPos(&mut pt);
+                        let _ = ScreenToClient(hwnd, &mut pt);
+                        let dpi = get_window_dpi(hwnd);
+                        let sidebar_w = if state.show_sidebar { get_sidebar_width(dpi) } else { 0 };
+                        let bar_h = if state.bar_visible { get_bar_height(dpi) } else { 0 };
+                        if state.show_sidebar && pt.x < sidebar_w && pt.y >= bar_h {
+                            let mut cr = RECT::default();
+                            let _ = GetClientRect(hwnd, &mut cr);
+                            let strip_h = if state.show_filmstrip { scale_by_dpi(92, dpi) } else { 0 };
+                            let header_h = scale_by_dpi(38, dpi);
+                            let list_h = (cr.bottom - bar_h - strip_h - header_h).max(0);
+                            let page_amount = (list_h * 9 / 10).max(50);
+                            state.scroll_sidebar(-page_amount, list_h, i32::MAX);
+                        } else {
+                            state.jump_to_next_folder();
+                        }
+                    }
+                    VK_HOME => {
+                        let mut pt = POINT::default();
+                        let _ = GetCursorPos(&mut pt);
+                        let _ = ScreenToClient(hwnd, &mut pt);
+                        let dpi = get_window_dpi(hwnd);
+                        let sidebar_w = if state.show_sidebar { get_sidebar_width(dpi) } else { 0 };
+                        let bar_h = if state.bar_visible { get_bar_height(dpi) } else { 0 };
+                        if state.show_sidebar && pt.x < sidebar_w && pt.y >= bar_h {
+                            state.scroll_sidebar(state.sidebar_scroll_offset, 0, state.sidebar_scroll_offset);
+                        } else {
+                            state.first_image();
+                        }
+                    }
+                    VK_END => {
+                        let mut pt = POINT::default();
+                        let _ = GetCursorPos(&mut pt);
+                        let _ = ScreenToClient(hwnd, &mut pt);
+                        let dpi = get_window_dpi(hwnd);
+                        let sidebar_w = if state.show_sidebar { get_sidebar_width(dpi) } else { 0 };
+                        let bar_h = if state.bar_visible { get_bar_height(dpi) } else { 0 };
+                        if state.show_sidebar && pt.x < sidebar_w && pt.y >= bar_h {
+                            let mut cr = RECT::default();
+                            let _ = GetClientRect(hwnd, &mut cr);
+                            let strip_h = if state.show_filmstrip { scale_by_dpi(92, dpi) } else { 0 };
+                            let header_h = scale_by_dpi(38, dpi);
+                            let list_h = (cr.bottom - bar_h - strip_h - header_h).max(0);
+                            let pinned_paths: HashSet<PathBuf> = state
+                                .layout_frames
+                                .iter()
+                                .filter(|f| f.pinned)
+                                .filter_map(|f| f.image.as_ref())
+                                .map(|img| PathBuf::from(&img.id.0))
+                                .collect();
+                            let layout = compute_sidebar_layout(
+                                &state.catalog,
+                                state.current_selected_catalog_index(),
+                                &pinned_paths,
+                                &state.collapsed_folders,
+                                state.sidebar_scroll_offset,
+                                cr.right,
+                                cr.bottom,
+                                bar_h,
+                                state.show_filmstrip,
+                                state.view_mode,
+                                state.layout_frames.len(),
+                                state.selected_frame_idx,
+                                dpi,
+                            );
+                            let max_scroll = (layout.total_content_height - list_h).max(0);
+                            state.scroll_sidebar(-(max_scroll - state.sidebar_scroll_offset), list_h, layout.total_content_height);
+                        } else {
+                            state.last_image();
+                        }
+                    }
                     VK_TAB => {
                         if state.view_mode == ViewMode::Composite && !state.layout_frames.is_empty()
                         {
@@ -1476,15 +1722,16 @@ fn handle_sidebar_click(
     }
 
     // 2. Check scrollbar thumb / track
-    if let Some(s_rect) = layout.scrollbar_rect {
-        if x >= s_rect.left && x <= s_rect.right && y >= s_rect.top && y <= s_rect.bottom {
+    if let (Some(s_rect), Some(thumb_rect)) = (layout.scrollbar_rect, layout.scrollbar_thumb_rect) {
+        if is_in_scrollbar_hit_area(x, y, s_rect, layout.list_rect, dpi) {
             let list_h = (layout.list_rect.bottom - layout.list_rect.top).max(0);
-            let click_ratio =
-                (y - s_rect.top) as f64 / (s_rect.bottom - s_rect.top).max(1) as f64;
-            let target_scroll =
-                ((layout.total_content_height - list_h) as f64 * click_ratio).round() as i32;
-            state.sidebar_scroll_offset =
-                target_scroll.clamp(0, (layout.total_content_height - list_h).max(0));
+            state.start_sidebar_scrollbar_drag(
+                y,
+                thumb_rect,
+                s_rect,
+                list_h,
+                layout.total_content_height,
+            );
             return true;
         }
     }

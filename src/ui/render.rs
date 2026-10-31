@@ -2088,13 +2088,24 @@ fn draw_sidebar(state: &AppState, hdc: HDC, win_w: i32, win_h: i32, bar_h: i32, 
         let _ = SelectClipRgn(hdc, None);
 
         if let (Some(bar_r), Some(thumb_r)) = (layout.scrollbar_rect, layout.scrollbar_thumb_rect) {
-            let bar_brush = CreateSolidBrush(COLORREF(0x00202327));
-            let _ = FillRect(hdc, &bar_r, bar_brush);
-            let _ = DeleteObject(bar_brush.into());
+            // Track background (subtle when active or hovered)
+            if state.sidebar_scrollbar_hovered || state.sidebar_scroll_dragging {
+                let bar_brush = CreateSolidBrush(COLORREF(0x0020242A));
+                let _ = FillRect(hdc, &bar_r, bar_brush);
+                let _ = DeleteObject(bar_brush.into());
+            }
 
-            let thumb_brush = CreateSolidBrush(M3_OUTLINE);
-            let _ = FillRect(hdc, &thumb_r, thumb_brush);
-            let _ = DeleteObject(thumb_brush.into());
+            // Thumb style according to interaction state
+            let thumb_color = if state.sidebar_scroll_dragging {
+                COLORREF(0x00A0A8B4)
+            } else if state.sidebar_scrollbar_hovered {
+                COLORREF(0x0078808C)
+            } else {
+                COLORREF(0x004A505C)
+            };
+
+            let thumb_radius = scale_by_dpi(4, dpi);
+            draw_round_rect_fill_stroke(hdc, &thumb_r, thumb_color, None, thumb_radius);
         }
     }
 }

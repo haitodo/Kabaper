@@ -70,6 +70,14 @@ pub struct AppState {
     pub show_filmstrip: bool,
     pub show_sidebar: bool,
     pub sidebar_scroll_offset: i32,
+    pub sidebar_target_scroll_offset: f64,
+    pub sidebar_scroll_offset_f: f64,
+    pub sidebar_scroll_animating: bool,
+    pub sidebar_last_wheel_time: Instant,
+    pub sidebar_wheel_streak: u32,
+    pub sidebar_scroll_dragging: bool,
+    pub sidebar_drag_thumb_offset_y: i32,
+    pub sidebar_scrollbar_hovered: bool,
     pub collapsed_folders: HashSet<PathBuf>,
     pub gdi_cache: crate::ui::types::GdiCache,
     pub timer_active: bool,
@@ -189,6 +197,14 @@ impl AppState {
             show_filmstrip: false,
             show_sidebar: false,
             sidebar_scroll_offset: 0,
+            sidebar_target_scroll_offset: 0.0,
+            sidebar_scroll_offset_f: 0.0,
+            sidebar_scroll_animating: false,
+            sidebar_last_wheel_time: Instant::now(),
+            sidebar_wheel_streak: 0,
+            sidebar_scroll_dragging: false,
+            sidebar_drag_thumb_offset_y: 0,
+            sidebar_scrollbar_hovered: false,
             collapsed_folders: HashSet::new(),
             gdi_cache: crate::ui::types::GdiCache::default(),
             timer_active: false,
@@ -1752,6 +1768,102 @@ impl AppState {
     pub fn scroll_sidebar(&mut self, delta: i32, list_h: i32, total_h: i32) {
         let max_scroll = (total_h - list_h).max(0);
         self.sidebar_scroll_offset = (self.sidebar_scroll_offset - delta).clamp(0, max_scroll);
+        self.sidebar_target_scroll_offset = self.sidebar_scroll_offset as f64;
+        self.sidebar_scroll_offset_f = self.sidebar_scroll_offset as f64;
+        self.sidebar_scroll_animating = false;
+    }
+
+    pub fn scroll_sidebar_wheel(&mut self, delta: i32, list_h: i32, total_h: i32, dpi: u32) {
+        let max_scroll = (total_h - list_h).max(0);
+        if max_scroll == 0 {
+            return;
+        }
+
+        // Fixed multi-line scrolling without acceleration (4 lines per notch)
+        let row_height = crate::ui::scale_by_dpi(44, dpi);
+        let lines_per_notch = 4;
+        let notches = delta / 120;
+        let scroll_amount = notches * (row_height * lines_per_notch);
+
+        self.sidebar_scroll_offset = (self.sidebar_scroll_offset - scroll_amount).clamp(0, max_scroll);
+        self.sidebar_target_scroll_offset = self.sidebar_scroll_offset as f64;
+        self.sidebar_scroll_offset_f = self.sidebar_scroll_offset as f64;
+        self.sidebar_scroll_animating = false;
+    }
+
+    pub fn step_sidebar_scroll_animation(&mut self, list_h: i32, total_h: i32) -> bool {
+        let max_scroll = (total_h - list_h).max(0) as f64;
+        self.sidebar_target_scroll_offset = self.sidebar_target_scroll_offset.clamp(0.0, max_scroll);
+
+        let diff = self.sidebar_target_scroll_offset - self.sidebar_scroll_offset_f;
+        if diff.abs() < 0.5 {
+            self.sidebar_scroll_offset_f = self.sidebar_target_scroll_offset;
+            self.sidebar_scroll_offset = self.sidebar_target_scroll_offset.round() as i32;
+            self.sidebar_scroll_animating = false;
+            return false;
+        }
+
+        let factor = 0.28;
+        self.sidebar_scroll_offset_f += diff * factor;
+        self.sidebar_scroll_offset = self.sidebar_scroll_offset_f.round() as i32;
+        true
+    }
+
+    pub fn start_sidebar_scrollbar_drag(
+        &mut self,
+        y: i32,
+        thumb_rect: RECT,
+        s_rect: RECT,
+        list_h: i32,
+        total_h: i32,
+    ) {
+        self.sidebar_scroll_dragging = true;
+        let max_scroll = (total_h - list_h).max(0);
+        let thumb_h = thumb_rect.bottom - thumb_rect.top;
+        let bar_usable_h = (s_rect.bottom - s_rect.top).max(1);
+        let travel = (bar_usable_h - thumb_h).max(1);
+
+        if y >= thumb_rect.top && y <= thumb_rect.bottom {
+            self.sidebar_drag_thumb_offset_y = y - thumb_rect.top;
+        } else {
+            self.sidebar_drag_thumb_offset_y = thumb_h / 2;
+            let target_thumb_top = (y - self.sidebar_drag_thumb_offset_y).clamp(s_rect.top, s_rect.bottom - thumb_h);
+            let ratio = (target_thumb_top - s_rect.top) as f64 / travel as f64;
+            let new_offset = (ratio * max_scroll as f64).round() as i32;
+            self.sidebar_scroll_offset = new_offset.clamp(0, max_scroll);
+            self.sidebar_scroll_offset_f = self.sidebar_scroll_offset as f64;
+            self.sidebar_target_scroll_offset = self.sidebar_scroll_offset as f64;
+        }
+        self.sidebar_scroll_animating = false;
+    }
+
+    pub fn drag_sidebar_scrollbar(
+        &mut self,
+        y: i32,
+        s_rect: RECT,
+        thumb_h: i32,
+        list_h: i32,
+        total_h: i32,
+    ) {
+        if !self.sidebar_scroll_dragging {
+            return;
+        }
+        let max_scroll = (total_h - list_h).max(0);
+        let bar_usable_h = (s_rect.bottom - s_rect.top).max(1);
+        let travel = (bar_usable_h - thumb_h).max(1);
+
+        let target_thumb_top = (y - self.sidebar_drag_thumb_offset_y).clamp(s_rect.top, s_rect.bottom - thumb_h);
+        let ratio = (target_thumb_top - s_rect.top) as f64 / travel as f64;
+        let new_offset = (ratio * max_scroll as f64).round() as i32;
+
+        self.sidebar_scroll_offset = new_offset.clamp(0, max_scroll);
+        self.sidebar_scroll_offset_f = self.sidebar_scroll_offset as f64;
+        self.sidebar_target_scroll_offset = self.sidebar_scroll_offset as f64;
+        self.sidebar_scroll_animating = false;
+    }
+
+    pub fn stop_sidebar_scrollbar_drag(&mut self) {
+        self.sidebar_scroll_dragging = false;
     }
 
     pub fn select_image_by_index(&mut self, target_idx: usize) {
@@ -1875,6 +1987,9 @@ impl AppState {
             } else if ty + item_h > self.sidebar_scroll_offset + list_h {
                 self.sidebar_scroll_offset = (ty + item_h + padding - list_h).max(0);
             }
+            self.sidebar_target_scroll_offset = self.sidebar_scroll_offset as f64;
+            self.sidebar_scroll_offset_f = self.sidebar_scroll_offset as f64;
+            self.sidebar_scroll_animating = false;
         }
     }
 
@@ -1885,6 +2000,9 @@ impl AppState {
             }
         }
         self.sidebar_scroll_offset = 0;
+        self.sidebar_target_scroll_offset = 0.0;
+        self.sidebar_scroll_offset_f = 0.0;
+        self.sidebar_scroll_animating = false;
         self.set_osd("全フォルダを折りたたみました".into(), 2, false);
     }
 

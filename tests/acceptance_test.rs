@@ -1199,6 +1199,21 @@ fn test_acceptance_sidebar_operations() {
     state.scroll_sidebar(500, 200, 500); // Scroll up past 0
     assert_eq!(state.sidebar_scroll_offset, 0);
 
+    // Test wheel scrolling (fixed 4 lines = 176px per notch)
+    state.scroll_sidebar_wheel(-120, 200, 500, 96);
+    assert_eq!(state.sidebar_scroll_offset, 176);
+
+    // Test scrollbar dragging
+    use windows::Win32::Foundation::RECT;
+    let s_rect = RECT { left: 288, top: 40, right: 296, bottom: 240 };
+    let thumb_rect = RECT { left: 288, top: 40, right: 296, bottom: 90 };
+    state.start_sidebar_scrollbar_drag(50, thumb_rect, s_rect, 200, 500);
+    assert!(state.sidebar_scroll_dragging);
+    state.drag_sidebar_scrollbar(240, s_rect, 50, 200, 500); // Drag to bottom
+    assert_eq!(state.sidebar_scroll_offset, 300); // max_scroll = 500 - 200 = 300
+    state.stop_sidebar_scrollbar_drag();
+    assert!(!state.sidebar_scroll_dragging);
+
     // Toggle sidebar off
     state.toggle_sidebar();
     assert!(!state.show_sidebar);

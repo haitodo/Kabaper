@@ -276,4 +276,111 @@ mod tests {
             assert!(rect_contains(&exclude.close_btn_rect, e_cx, e_cy));
         }
     }
+
+    #[test]
+    fn test_sidebar_scrollbar_hit_area() {
+        use windows::Win32::Foundation::RECT;
+        let s_rect = RECT {
+            left: 285,
+            top: 50,
+            right: 295,
+            bottom: 450,
+        };
+        let list_rect = RECT {
+            left: 0,
+            top: 50,
+            right: 300,
+            bottom: 450,
+        };
+        // Inside thumb/bar
+        assert!(is_in_scrollbar_hit_area(290, 100, s_rect, list_rect, 96));
+        // Hit margin to the left of the bar
+        assert!(is_in_scrollbar_hit_area(278, 100, s_rect, list_rect, 96));
+        // Far left of hit margin -> false
+        assert!(!is_in_scrollbar_hit_area(200, 100, s_rect, list_rect, 96));
+        // Above or below
+        assert!(!is_in_scrollbar_hit_area(290, 40, s_rect, list_rect, 96));
+        assert!(!is_in_scrollbar_hit_area(290, 460, s_rect, list_rect, 96));
+    }
+
+    #[test]
+    fn test_sidebar_wheel_fixed_multiline() {
+        use std::fs;
+        let temp = std::env::temp_dir().join(format!("kabaper_scroll_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp);
+        let storage = crate::store::Storage::init_with_dir(temp.clone()).unwrap();
+        let initial_config = crate::store::AppConfig::default();
+        let mut state = crate::ui::state::AppState::new(storage, initial_config, None).unwrap();
+
+        let list_h = 400;
+        let total_h = 2000;
+        let dpi = 96;
+
+        // 1 notch down (delta = -120): exactly 4 lines (44 * 4 = 176px)
+        state.scroll_sidebar_wheel(-120, list_h, total_h, dpi);
+        assert_eq!(state.sidebar_scroll_offset, 176);
+
+        // 2nd notch down: linear without acceleration (176 * 2 = 352px)
+        state.scroll_sidebar_wheel(-120, list_h, total_h, dpi);
+        assert_eq!(state.sidebar_scroll_offset, 352);
+
+        // 1 notch up: returns exactly 176px
+        state.scroll_sidebar_wheel(120, list_h, total_h, dpi);
+        assert_eq!(state.sidebar_scroll_offset, 176);
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_sidebar_scrollbar_drag_and_track_click() {
+        use std::fs;
+        use windows::Win32::Foundation::RECT;
+        let temp = std::env::temp_dir().join(format!("kabaper_drag_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp);
+        let storage = crate::store::Storage::init_with_dir(temp.clone()).unwrap();
+        let initial_config = crate::store::AppConfig::default();
+        let mut state = crate::ui::state::AppState::new(storage, initial_config, None).unwrap();
+
+        let list_h = 400;
+        let total_h = 2000; // max_scroll = 1600
+        let s_rect = RECT {
+            left: 288,
+            top: 50,
+            right: 296,
+            bottom: 450, // usable_h = 400
+        };
+        let thumb_rect = RECT {
+            left: 288,
+            top: 50,
+            right: 296,
+            bottom: 130, // thumb_h = 80, travel = 320
+        };
+
+        // 1. Click thumb at top + 20px (y = 70)
+        state.start_sidebar_scrollbar_drag(70, thumb_rect, s_rect, list_h, total_h);
+        assert!(state.sidebar_scroll_dragging);
+        assert_eq!(state.sidebar_drag_thumb_offset_y, 20);
+
+        // Drag down by 160px (target_thumb_top = 230 - 20 = 210, ratio = (210 - 50) / 320 = 160/320 = 0.5)
+        state.drag_sidebar_scrollbar(230, s_rect, 80, list_h, total_h);
+        // Halfway of max_scroll (1600 * 0.5 = 800)
+        assert_eq!(state.sidebar_scroll_offset, 800);
+
+        // Drag past bottom (y = 500)
+        state.drag_sidebar_scrollbar(500, s_rect, 80, list_h, total_h);
+        assert_eq!(state.sidebar_scroll_offset, 1600);
+
+        // Stop drag
+        state.stop_sidebar_scrollbar_drag();
+        assert!(!state.sidebar_scroll_dragging);
+
+        // 2. Click track at y = 250 (middle of usable range)
+        state.start_sidebar_scrollbar_drag(250, thumb_rect, s_rect, list_h, total_h);
+        assert!(state.sidebar_scroll_dragging);
+        // Should center thumb on 250 (thumb_top = 250 - 40 = 210, offset = 800)
+        assert_eq!(state.sidebar_scroll_offset, 800);
+
+        state.stop_sidebar_scrollbar_drag();
+        let _ = fs::remove_dir_all(&temp);
+    }
 }

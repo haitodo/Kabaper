@@ -579,92 +579,102 @@ pub fn compute_sidebar_layout(
         y_accum += folder_h;
 
         if !is_collapsed {
-            for &idx in &group.item_indices {
-                let item = &catalog.items[idx];
-                let item_top = list_rect.top + y_accum - scroll_offset;
-                let item_bottom = item_top + item_h;
-                if item_bottom >= list_rect.top && item_top <= list_rect.bottom {
-                    let is_selected = selected_index == Some(idx);
-                    let is_pinned = pinned_paths.contains(&item.path);
+            let group_items_h = (item_count as i32) * item_h;
+            let group_items_top = list_rect.top + y_accum - scroll_offset;
+            let group_items_bottom = group_items_top + group_items_h;
 
-                    let mut frame_targets = Vec::new();
-                    if view_mode == ViewMode::Composite && layout_frames_count >= 2 {
-                        let btn_w = scale_by_dpi(24, dpi);
-                        let btn_h = scale_by_dpi(20, dpi);
-                        let btn_gap = scale_by_dpi(3, dpi);
-                        let badge_reserve = if is_pinned || item.is_excluded {
-                            scale_by_dpi(26, dpi)
-                        } else {
-                            0
-                        };
-                        let total_btns_w = (layout_frames_count as i32) * btn_w
-                            + ((layout_frames_count as i32) - 1) * btn_gap;
-                        let start_btn_x =
-                            list_rect.right - scale_by_dpi(6, dpi) - badge_reserve - total_btns_w;
-                        let by = item_top + (item_h - btn_h) / 2;
+            // If the entire group of items is outside the visible list area, skip individual item iteration
+            if group_items_bottom < list_rect.top || group_items_top > list_rect.bottom {
+                y_accum += group_items_h;
+            } else {
+                for &idx in &group.item_indices {
+                    let item = &catalog.items[idx];
+                    let item_top = list_rect.top + y_accum - scroll_offset;
+                    let item_bottom = item_top + item_h;
+                    if item_bottom >= list_rect.top && item_top <= list_rect.bottom {
+                        let is_selected = selected_index == Some(idx);
+                        let is_pinned = pinned_paths.contains(&item.path);
 
-                        for f_idx in 0..layout_frames_count {
-                            let label = if layout_frames_count == 2 {
-                                if f_idx == 0 { "左".to_string() } else { "右".to_string() }
-                            } else if layout_frames_count == 3 {
-                                if f_idx == 0 {
-                                    "左".to_string()
-                                } else if f_idx == 1 {
-                                    "中".to_string()
-                                } else {
-                                    "右".to_string()
-                                }
+                        let mut frame_targets = Vec::new();
+                        if view_mode == ViewMode::Composite && layout_frames_count >= 2 {
+                            let btn_w = scale_by_dpi(24, dpi);
+                            let btn_h = scale_by_dpi(20, dpi);
+                            let btn_gap = scale_by_dpi(3, dpi);
+                            let badge_reserve = if is_pinned || item.is_excluded {
+                                scale_by_dpi(26, dpi)
                             } else {
-                                format!("{}", f_idx + 1)
+                                0
                             };
-                            let bx = start_btn_x + (f_idx as i32) * (btn_w + btn_gap);
-                            frame_targets.push((
-                                f_idx,
-                                label,
-                                RECT {
-                                    left: bx,
-                                    top: by,
-                                    right: bx + btn_w,
-                                    bottom: by + btn_h,
-                                },
-                            ));
-                        }
-                    }
+                            let total_btns_w = (layout_frames_count as i32) * btn_w
+                                + ((layout_frames_count as i32) - 1) * btn_gap;
+                            let start_btn_x =
+                                list_rect.right - scale_by_dpi(6, dpi) - badge_reserve - total_btns_w;
+                            let by = item_top + (item_h - btn_h) / 2;
 
-                    rows.push(SidebarRowLayout {
-                        kind: SidebarRowKind::FileItem {
-                            catalog_index: idx,
-                            filename: item.filename.clone(),
-                            is_selected,
-                            is_pinned,
-                            is_excluded: item.is_excluded,
-                            frame_targets,
-                        },
-                        rect: RECT {
-                            left: list_rect.left,
-                            top: item_top,
-                            right: list_rect.right,
-                            bottom: item_bottom,
-                        },
-                    });
+                            for f_idx in 0..layout_frames_count {
+                                let label = if layout_frames_count == 2 {
+                                    if f_idx == 0 { "左".to_string() } else { "右".to_string() }
+                                } else if layout_frames_count == 3 {
+                                    if f_idx == 0 {
+                                        "左".to_string()
+                                    } else if f_idx == 1 {
+                                        "中".to_string()
+                                    } else {
+                                        "右".to_string()
+                                    }
+                                } else {
+                                    format!("{}", f_idx + 1)
+                                };
+                                let bx = start_btn_x + (f_idx as i32) * (btn_w + btn_gap);
+                                frame_targets.push((
+                                    f_idx,
+                                    label,
+                                    RECT {
+                                        left: bx,
+                                        top: by,
+                                        right: bx + btn_w,
+                                        bottom: by + btn_h,
+                                    },
+                                ));
+                            }
+                        }
+
+                        rows.push(SidebarRowLayout {
+                            kind: SidebarRowKind::FileItem {
+                                catalog_index: idx,
+                                filename: item.filename.clone(),
+                                is_selected,
+                                is_pinned,
+                                is_excluded: item.is_excluded,
+                                frame_targets,
+                            },
+                            rect: RECT {
+                                left: list_rect.left,
+                                top: item_top,
+                                right: list_rect.right,
+                                bottom: item_bottom,
+                            },
+                        });
+                    }
+                    y_accum += item_h;
                 }
-                y_accum += item_h;
             }
         }
     }
 
     let total_content_height = y_accum;
     let (scrollbar_rect, scrollbar_thumb_rect) = if total_content_height > list_h && list_h > 0 {
-        let bar_w = scale_by_dpi(6, dpi);
+        let bar_w = scale_by_dpi(8, dpi);
+        let margin_r = scale_by_dpi(3, dpi);
         let s_rect = RECT {
-            left: list_rect.right - bar_w - scale_by_dpi(2, dpi),
+            left: list_rect.right - bar_w - margin_r,
             top: list_rect.top + scale_by_dpi(2, dpi),
-            right: list_rect.right - scale_by_dpi(2, dpi),
+            right: list_rect.right - margin_r,
             bottom: list_rect.bottom - scale_by_dpi(2, dpi),
         };
         let bar_usable_h = (s_rect.bottom - s_rect.top).max(1);
         let thumb_h = ((bar_usable_h as i64 * list_h as i64) / total_content_height as i64) as i32;
-        let thumb_h = thumb_h.clamp(scale_by_dpi(20, dpi), bar_usable_h);
+        let thumb_h = thumb_h.clamp(scale_by_dpi(24, dpi), bar_usable_h);
         let max_scroll = (total_content_height - list_h).max(1);
         let thumb_top = s_rect.top
             + ((scroll_offset as i64 * (bar_usable_h - thumb_h) as i64) / max_scroll as i64) as i32;
@@ -692,4 +702,10 @@ pub fn compute_sidebar_layout(
         scrollbar_rect,
         scrollbar_thumb_rect,
     }
+}
+
+pub fn is_in_scrollbar_hit_area(x: i32, y: i32, s_rect: RECT, list_rect: RECT, dpi: u32) -> bool {
+    let hit_left = s_rect.left - scale_by_dpi(10, dpi);
+    let hit_right = list_rect.right;
+    x >= hit_left && x <= hit_right && y >= s_rect.top && y <= s_rect.bottom
 }
