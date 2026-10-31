@@ -208,50 +208,50 @@ impl ImageDecoder {
                 (raw_w, raw_h)
             };
 
-            // Setup source: apply EXIF flip/rotation first
-            let source_bitmap: IWICBitmapSource = if orientation != ExifOrientation::Normal {
-                let rotator = self.factory.CreateBitmapFlipRotator()?;
-                rotator.Initialize(&frame, orientation.to_wic_transform())?;
-                rotator.cast()?
-            } else {
-                frame.cast()?
-            };
-
-            // Optional color context transformation to sRGB
-            let transformed_source = match self.try_color_transform(&source_bitmap, &frame) {
-                Ok(trans) => trans,
-                Err(_) => {
-                    // Fallback to source directly with warning logged
-                    source_bitmap
-                }
-            };
-
-            // Optional downscaling for cache
+            // 1. Optional downscaling on raw frame first (dramatically reduces transform work & memory)
             let scaled_source: IWICBitmapSource = if let Some(limit) = max_edge {
                 let max_dim = orig_w.max(orig_h);
                 if max_dim > limit && limit > 0 {
                     let scale = limit as f64 / max_dim as f64;
-                    let target_w = ((orig_w as f64 * scale).round() as u32).max(1);
-                    let target_h = ((orig_h as f64 * scale).round() as u32).max(1);
+                    let target_raw_w = ((raw_w as f64 * scale).round() as u32).max(1);
+                    let target_raw_h = ((raw_h as f64 * scale).round() as u32).max(1);
                     let scaler = self.factory.CreateBitmapScaler()?;
                     scaler.Initialize(
-                        &transformed_source,
-                        target_w,
-                        target_h,
+                        &frame,
+                        target_raw_w,
+                        target_raw_h,
                         WICBitmapInterpolationModeHighQualityCubic,
                     )?;
                     scaler.cast()?
                 } else {
-                    transformed_source
+                    frame.cast()?
                 }
             } else {
-                transformed_source
+                frame.cast()?
             };
 
-            // Format converter to 32bppPBGRA (premultiplied BGRA)
+            // 2. Apply EXIF flip/rotation on the scaled bitmap
+            let rotated_source: IWICBitmapSource = if orientation != ExifOrientation::Normal {
+                let rotator = self.factory.CreateBitmapFlipRotator()?;
+                rotator.Initialize(&scaled_source, orientation.to_wic_transform())?;
+                rotator.cast()?
+            } else {
+                scaled_source
+            };
+
+            // 3. Optional color context transformation to sRGB
+            let transformed_source = match self.try_color_transform(&rotated_source, &frame) {
+                Ok(trans) => trans,
+                Err(_) => {
+                    // Fallback to source directly with warning logged
+                    rotated_source
+                }
+            };
+
+            // 4. Format converter to 32bppPBGRA (premultiplied BGRA)
             let converter = self.factory.CreateFormatConverter()?;
             converter.Initialize(
-                &scaled_source,
+                &transformed_source,
                 &GUID_WICPixelFormat32bppPBGRA,
                 WICBitmapDitherTypeNone,
                 None,

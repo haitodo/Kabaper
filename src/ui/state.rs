@@ -2,10 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::{
+    Arc, mpsc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rayon::prelude::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
@@ -17,7 +19,7 @@ use crate::apply::WallpaperManager;
 use crate::catalog::{Catalog, is_supported_image, normalize_path};
 use crate::compose::{
     ComposedBitmap, compose_base_layer, compose_foreground_layer,
-    compose_single_frame_foreground, save_png_wic,
+    compose_single_frame_foreground, plan_has_background_blur, save_png_wic,
 };
 use crate::decode::{DecodedImage, ImageDecoder};
 use crate::layout::{
@@ -69,6 +71,24 @@ pub struct AppState {
     pub show_sidebar: bool,
     pub sidebar_scroll_offset: i32,
     pub collapsed_folders: HashSet<PathBuf>,
+    pub gdi_cache: crate::ui::types::GdiCache,
+    pub timer_active: bool,
+    pub prefetch_tx: mpsc::Sender<PrefetchResult>,
+    pub prefetch_rx: mpsc::Receiver<PrefetchResult>,
+    pub prefetch_gen: u64,
+    pub latest_prefetch_req: Arc<AtomicU64>,
+}
+
+#[derive(Debug)]
+pub struct PrefetchItem {
+    pub id: ImageId,
+    pub image: DecodedImage,
+}
+
+#[derive(Debug)]
+pub struct PrefetchResult {
+    pub generation: u64,
+    pub items: Vec<PrefetchItem>,
 }
 
 impl AppState {
@@ -128,6 +148,9 @@ impl AppState {
             error_banner.push("タスクスケジューラサービスに接続できません".into());
         }
 
+        let (prefetch_tx, prefetch_rx) = mpsc::channel();
+        let latest_prefetch_req = Arc::new(AtomicU64::new(0));
+
         let mut state = Self {
             storage,
             config,
@@ -167,6 +190,12 @@ impl AppState {
             show_sidebar: false,
             sidebar_scroll_offset: 0,
             collapsed_folders: HashSet::new(),
+            gdi_cache: crate::ui::types::GdiCache::default(),
+            timer_active: false,
+            prefetch_tx,
+            prefetch_rx,
+            prefetch_gen: 0,
+            latest_prefetch_req,
         };
 
         state.show_info = state.config.window.show_info;
@@ -201,11 +230,34 @@ impl AppState {
             Duration::from_secs(duration_secs),
             has_undo,
         ));
+        self.update_timer();
     }
 
     pub fn mark_config_dirty(&mut self) {
         self.config_dirty = true;
         self.last_config_change = Instant::now();
+        self.update_timer();
+    }
+
+    pub fn update_timer(&mut self) {
+        if self.hwnd.0.is_null() {
+            return;
+        }
+        let needs_timer = self.osd.is_some()
+            || (self.fullscreen && self.bar_visible)
+            || self.config_dirty;
+
+        unsafe {
+            if needs_timer {
+                if !self.timer_active {
+                    let _ = SetTimer(Some(self.hwnd), 1, 100, None);
+                    self.timer_active = true;
+                }
+            } else if self.timer_active {
+                let _ = KillTimer(Some(self.hwnd), 1);
+                self.timer_active = false;
+            }
+        }
     }
 
     pub fn target_monitor(&self) -> Option<&MonitorInfo> {
@@ -361,8 +413,15 @@ impl AppState {
         }
 
         // Re-compose layout bitmap using base layer cache for instant pan updates
-        let base_layer = compose_base_layer(&plan, &self.cached_images, self.config.layout.dim_ratio);
-        let mut composed = base_layer.clone();
+        let has_blur = plan_has_background_blur(&plan);
+        let (base_layer, mut composed) = if has_blur {
+            let base = compose_base_layer(&plan, &self.cached_images, self.config.layout.dim_ratio);
+            let comp = base.clone();
+            (Some(base), comp)
+        } else {
+            let comp = ComposedBitmap::new(mw, mh);
+            (None, comp)
+        };
         compose_foreground_layer(&mut composed, &plan, &self.cached_images);
 
         // Sync frames back
@@ -388,7 +447,7 @@ impl AppState {
         }
 
         self.active_plan = Some(plan);
-        self.active_base_layer = Some(base_layer);
+        self.active_base_layer = base_layer;
         self.active_composed = Some(composed);
 
         self.prefetch_adjacent_images();
@@ -426,9 +485,14 @@ impl AppState {
 
         let plan = plan_layout(&req, &[]);
 
-        if let (Some(composed), Some(base)) = (&mut self.active_composed, &self.active_base_layer) {
+        if let Some(composed) = &mut self.active_composed {
             if let Some(frame_plan) = plan.frames.get(frame_idx) {
-                compose_single_frame_foreground(composed, frame_plan, base, &self.cached_images);
+                compose_single_frame_foreground(
+                    composed,
+                    frame_plan,
+                    self.active_base_layer.as_ref(),
+                    &self.cached_images,
+                );
             }
         }
 
@@ -449,8 +513,10 @@ impl AppState {
         }
     }
 
-    /// Parallel prefetch of adjacent images using Rayon worker threads
+    /// Parallel prefetch of adjacent images using background Rayon tasks
     pub fn prefetch_adjacent_images(&mut self) {
+        self.poll_prefetch_results();
+
         if self.catalog.items.is_empty() {
             return;
         }
@@ -476,21 +542,53 @@ impl AppState {
             return;
         }
 
-        let decoded_items: Vec<(ImageId, DecodedImage)> = to_fetch
-            .into_par_iter()
-            .filter_map(|path| {
+        self.prefetch_gen += 1;
+        let req_gen = self.prefetch_gen;
+        self.latest_prefetch_req.store(req_gen, Ordering::SeqCst);
+
+        let tx = self.prefetch_tx.clone();
+        let latest_req = Arc::clone(&self.latest_prefetch_req);
+
+        rayon::spawn(move || {
+            if latest_req.load(Ordering::Relaxed) != req_gen {
+                return;
+            }
+            let mut results = Vec::new();
+            for path in to_fetch {
+                if latest_req.load(Ordering::Relaxed) != req_gen {
+                    return;
+                }
                 if let Ok(decoder) = ImageDecoder::new()
                     && let Ok(dec) = decoder.decode_image(&path, Some(4096))
                 {
-                    Some((ImageId(path.to_string_lossy().to_string()), dec))
-                } else {
-                    None
+                    results.push(PrefetchItem {
+                        id: ImageId(path.to_string_lossy().to_string()),
+                        image: dec,
+                    });
                 }
-            })
-            .collect();
+            }
+            if !results.is_empty() && latest_req.load(Ordering::Relaxed) == req_gen {
+                let _ = tx.send(PrefetchResult {
+                    generation: req_gen,
+                    items: results,
+                });
+            }
+        });
+    }
 
-        for (id, dec) in decoded_items {
-            self.cached_images.insert(id, dec);
+    /// Poll completed prefetch decodes and insert into cache without blocking
+    pub fn poll_prefetch_results(&mut self) {
+        let mut updated = false;
+        while let Ok(res) = self.prefetch_rx.try_recv() {
+            if res.generation == self.prefetch_gen {
+                for item in res.items {
+                    self.cached_images.insert(item.id, item.image);
+                    updated = true;
+                }
+            }
+        }
+        if updated {
+            self.prune_image_cache();
         }
     }
 
@@ -544,6 +642,11 @@ impl AppState {
     /// Releases prefetch cache (±1 adjacent images) when the window is minimized (Spec 8.2),
     /// while retaining currently displayed images.
     pub fn release_prefetch_cache(&mut self) {
+        self.prefetch_gen += 1;
+        self.latest_prefetch_req
+            .store(self.prefetch_gen, Ordering::SeqCst);
+        while self.prefetch_rx.try_recv().is_ok() {}
+
         let mut keep = HashSet::new();
 
         // 1. Current normal view image
@@ -606,7 +709,7 @@ impl AppState {
 
             let start_idx = current_path
                 .as_ref()
-                .and_then(|p| self.catalog.items.iter().position(|it| &it.path == p))
+                .and_then(|p| self.catalog.find_index_by_path(p))
                 .or(self.catalog.current_index)
                 .unwrap_or(0);
 
@@ -663,7 +766,7 @@ impl AppState {
 
             let start_idx = current_path
                 .as_ref()
-                .and_then(|p| self.catalog.items.iter().position(|it| &it.path == p))
+                .and_then(|p| self.catalog.find_index_by_path(p))
                 .or(self.catalog.current_index)
                 .unwrap_or(0);
 
@@ -1129,13 +1232,7 @@ impl AppState {
     pub fn current_selected_catalog_index(&self) -> Option<usize> {
         if self.view_mode == ViewMode::Composite {
             if let Some(path) = self.current_selected_image_path() {
-                let norm_path = normalize_path(&path);
-                if let Some(idx) = self
-                    .catalog
-                    .items
-                    .iter()
-                    .position(|it| normalize_path(&it.path) == norm_path)
-                {
+                if let Some(idx) = self.catalog.find_index_by_path(&path) {
                     return Some(idx);
                 }
             }
@@ -1712,6 +1809,9 @@ impl AppState {
     }
 
     pub fn ensure_current_item_visible_in_sidebar(&mut self) {
+        if !self.show_sidebar {
+            return;
+        }
         let Some(cur_idx) = self.current_selected_catalog_index() else {
             return;
         };
@@ -1733,26 +1833,18 @@ impl AppState {
         let folder_h = crate::ui::scale_by_dpi(28, dpi);
         let item_h = crate::ui::scale_by_dpi(44, dpi);
 
-        let mut groups: Vec<(PathBuf, Vec<usize>)> = Vec::new();
-        for (idx, it) in self.catalog.items.iter().enumerate() {
-            let parent = it.path.parent().unwrap_or(Path::new("")).to_path_buf();
-            if let Some(last) = groups.last_mut() {
-                if last.0 == parent {
-                    last.1.push(idx);
-                    continue;
-                }
-            }
-            groups.push((parent, vec![idx]));
+        if self.catalog.folder_groups.is_empty() && !self.catalog.items.is_empty() {
+            self.catalog.rebuild_folder_groups();
         }
 
         let mut y_accum = 0;
         let mut target_y = None;
 
-        for (folder_path, item_indices) in groups {
-            let is_collapsed = self.collapsed_folders.contains(&folder_path);
+        for group in &self.catalog.folder_groups {
+            let is_collapsed = self.collapsed_folders.contains(&group.folder_path);
             y_accum += folder_h;
             if !is_collapsed {
-                for idx in item_indices {
+                for &idx in &group.item_indices {
                     if idx == cur_idx {
                         target_y = Some(y_accum);
                         break;

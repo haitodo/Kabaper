@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::apply::WallpaperManager;
-use crate::catalog::{Catalog, normalize_path};
+use crate::catalog::{collect_images_recursive, normalize_path};
 use crate::compose::{compose_layout, save_png_wic};
 use crate::decode::ImageDecoder;
 use crate::layout::{FrameInput, ImageSpec, LayoutMode, LayoutRequest, plan_layout};
@@ -76,7 +76,8 @@ pub fn execute_random_update(
         )));
     }
 
-    // 3. Catalog and candidate enumeration (Spec 6.1)
+    // 3. Fast candidate enumeration (Spec 6.1)
+    // Avoid heavy natural sort and folder grouping metadata computation
     let excluded_set: HashSet<PathBuf> = cfg
         .library
         .excluded
@@ -84,14 +85,12 @@ pub fn execute_random_update(
         .map(|s| normalize_path(Path::new(s)))
         .collect();
 
-    let mut catalog = Catalog::new(excluded_set);
-    if !catalog.open_folder(&folder, None) {
-        return Err(RandomUpdateError::ZeroCandidates(
-            "フォルダの読込に失敗しました".to_string(),
-        ));
-    }
+    let raw_images = collect_images_recursive(&folder);
+    let mut valid_candidates: Vec<PathBuf> = raw_images
+        .into_iter()
+        .filter(|p| !excluded_set.contains(p) && !excluded_set.contains(&normalize_path(p)))
+        .collect();
 
-    let mut valid_candidates = catalog.get_valid_candidates();
     if valid_candidates.is_empty() {
         return Err(RandomUpdateError::ZeroCandidates(
             "有効な候補画像が0枚です".to_string(),
@@ -164,8 +163,7 @@ pub fn execute_random_update(
                     used_for_this_monitor.push(path.clone());
                 }
                 Err(e) => {
-                    // Mark failed in catalog and continue (Spec 6.1)
-                    catalog.mark_failed(path, format!("{}", e));
+                    // Mark failed and continue (Spec 6.1)
                     storage.log(
                         "WARN",
                         &format!("Image decode failed for {}: {}", path.display(), e),

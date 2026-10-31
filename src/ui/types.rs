@@ -1,9 +1,48 @@
 use std::sync::atomic::AtomicU32;
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Gdi::*;
 use windows::core::*;
 
 pub const OVERLAY_CLASS_NAME: PCWSTR = w!("KabaperOverlayClass");
 pub static SEQ_COUNTER: AtomicU32 = AtomicU32::new(1);
+
+pub struct GdiCache {
+    pub mem_dc: HDC,
+    pub mem_bmp: HBITMAP,
+    pub bmp_width: i32,
+    pub bmp_height: i32,
+    pub font: HFONT,
+    pub font_dpi: u32,
+}
+
+impl Default for GdiCache {
+    fn default() -> Self {
+        Self {
+            mem_dc: HDC(std::ptr::null_mut()),
+            mem_bmp: HBITMAP(std::ptr::null_mut()),
+            bmp_width: 0,
+            bmp_height: 0,
+            font: HFONT(std::ptr::null_mut()),
+            font_dpi: 0,
+        }
+    }
+}
+
+impl Drop for GdiCache {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.font.0.is_null() {
+                let _ = DeleteObject(self.font.into());
+            }
+            if !self.mem_bmp.0.is_null() {
+                let _ = DeleteObject(self.mem_bmp.into());
+            }
+            if !self.mem_dc.0.is_null() {
+                let _ = DeleteDC(self.mem_dc);
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {

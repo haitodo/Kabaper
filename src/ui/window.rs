@@ -174,8 +174,8 @@ pub fn run_gui(mut state: AppState, class_name: &str) -> Result<()> {
         // Enable Drag & Drop (Spec 2.1)
         DragAcceptFiles(hwnd, true);
 
-        // Set timer for OSD fade, bar fade, and config debounce
-        let _ = SetTimer(Some(hwnd), 1, 100, None);
+        // Update timer state on startup
+        state.update_timer();
 
         // Show window (Spec 4.1: restore fullscreen if saved)
         if win_cfg.fullscreen {
@@ -234,6 +234,8 @@ unsafe extern "system" fn wnd_proc(
 
         match msg {
             WM_TIMER => {
+                state.poll_prefetch_results();
+
                 // Check OSD expiry
                 if let Some((_, start, dur, _)) = &state.osd
                     && start.elapsed() >= *dur
@@ -258,6 +260,9 @@ unsafe extern "system" fn wnd_proc(
                     state.config_dirty = false;
                     let _ = state.storage.save_config(&state.config);
                 }
+
+                // Re-evaluate whether timer is still needed
+                state.update_timer();
 
                 LRESULT(0)
             }
@@ -291,6 +296,7 @@ unsafe extern "system" fn wnd_proc(
 
                 if state.fullscreen && !state.bar_visible && y < 50 {
                     state.bar_visible = true;
+                    state.update_timer();
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
 
@@ -997,6 +1003,7 @@ unsafe extern "system" fn wnd_proc(
             }
 
             WM_PAINT => {
+                state.poll_prefetch_results();
                 let mut ps = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut ps);
                 paint_window(state, hwnd, hdc);

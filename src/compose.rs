@@ -21,9 +21,12 @@ impl ComposedBitmap {
     pub fn new(width: u32, height: u32) -> Self {
         let size = (width as usize) * (height as usize);
         let mut pixels = vec![0u8; size * 4];
-        // Initialize with opaque black (B=0, G=0, R=0, A=255) in parallel
-        pixels.par_chunks_exact_mut(4).for_each(|chunk| {
-            chunk[3] = 255;
+        let row_stride = (width as usize) * 4;
+        // Initialize with opaque black (B=0, G=0, R=0, A=255) by rows in parallel
+        pixels.par_chunks_exact_mut(row_stride).for_each(|row| {
+            for chunk in row.chunks_exact_mut(4) {
+                chunk[3] = 255;
+            }
         });
         Self {
             width,
@@ -113,10 +116,16 @@ pub fn compose_foreground_layer(
     }
 }
 
+pub fn plan_has_background_blur(plan: &LayoutPlan) -> bool {
+    plan.frames.iter().any(|f| {
+        f.content.as_ref().map_or(false, |c| c.blur_sigma > 0.0)
+    })
+}
+
 pub fn compose_single_frame_foreground(
     target: &mut ComposedBitmap,
     frame: &crate::layout::FramePlan,
-    base: &ComposedBitmap,
+    base: Option<&ComposedBitmap>,
     images: &HashMap<ImageId, DecodedImage>,
 ) {
     let slot = frame.slot;
@@ -137,16 +146,28 @@ pub fn compose_single_frame_foreground(
     let byte_start = (min_x as usize) * 4;
     let byte_end = (max_x as usize) * 4;
 
-    // Restore background from base layer for this slot in parallel
     let target_slice = &mut target.pixels[(min_y as usize) * row_stride..(max_y as usize) * row_stride];
-    let base_slice = &base.pixels[(min_y as usize) * row_stride..(max_y as usize) * row_stride];
 
-    target_slice
-        .par_chunks_exact_mut(row_stride)
-        .zip(base_slice.par_chunks_exact(row_stride))
-        .for_each(|(target_row, base_row)| {
-            target_row[byte_start..byte_end].copy_from_slice(&base_row[byte_start..byte_end]);
-        });
+    if let Some(base) = base {
+        let base_slice = &base.pixels[(min_y as usize) * row_stride..(max_y as usize) * row_stride];
+        target_slice
+            .par_chunks_exact_mut(row_stride)
+            .zip(base_slice.par_chunks_exact(row_stride))
+            .for_each(|(target_row, base_row)| {
+                target_row[byte_start..byte_end].copy_from_slice(&base_row[byte_start..byte_end]);
+            });
+    } else {
+        target_slice
+            .par_chunks_exact_mut(row_stride)
+            .for_each(|target_row| {
+                for chunk in target_row[byte_start..byte_end].chunks_exact_mut(4) {
+                    chunk[0] = 0;
+                    chunk[1] = 0;
+                    chunk[2] = 0;
+                    chunk[3] = 255;
+                }
+            });
+    }
 
     // Render foreground for this frame
     if let Some(placed) = &frame.content

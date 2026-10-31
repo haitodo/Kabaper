@@ -6,6 +6,13 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderGroup {
+    pub folder_path: PathBuf,
+    pub display_name: String,
+    pub item_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogItem {
     pub path: PathBuf,
     pub filename: String,
@@ -20,6 +27,8 @@ pub struct Catalog {
     pub current_index: Option<usize>,
     pub excluded_paths: HashSet<PathBuf>,
     pub failed_decodes: HashMap<PathBuf, String>,
+    pub path_indices: HashMap<PathBuf, usize>,
+    pub folder_groups: Vec<FolderGroup>,
 }
 
 impl Catalog {
@@ -30,7 +39,65 @@ impl Catalog {
             current_index: None,
             excluded_paths,
             failed_decodes: HashMap::new(),
+            path_indices: HashMap::new(),
+            folder_groups: Vec::new(),
         }
+    }
+
+    pub fn sync_metadata(&mut self) {
+        self.path_indices.clear();
+        for (idx, item) in self.items.iter().enumerate() {
+            self.path_indices.insert(item.path.clone(), idx);
+        }
+        self.rebuild_folder_groups();
+    }
+
+    pub fn rebuild_folder_groups(&mut self) {
+        self.folder_groups.clear();
+        let root_opt = &self.folder;
+        for (idx, item) in self.items.iter().enumerate() {
+            let parent = item.path.parent().unwrap_or(Path::new("")).to_path_buf();
+            if let Some(last_group) = self.folder_groups.last_mut() {
+                if last_group.folder_path == parent {
+                    last_group.item_indices.push(idx);
+                    continue;
+                }
+            }
+            let display_name = if let Some(root) = root_opt {
+                if &parent == root {
+                    let name = root.file_name().and_then(|n| n.to_str()).unwrap_or("ルート");
+                    format!("📁 {} (直下)", name)
+                } else if let Ok(rel) = parent.strip_prefix(root) {
+                    format!("📁 {}", rel.to_string_lossy())
+                } else {
+                    let name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("フォルダ");
+                    format!("📁 {}", name)
+                }
+            } else {
+                let name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("フォルダ");
+                format!("📁 {}", name)
+            };
+            self.folder_groups.push(FolderGroup {
+                folder_path: parent,
+                display_name,
+                item_indices: vec![idx],
+            });
+        }
+    }
+
+    pub fn find_index_by_path(&self, path: &Path) -> Option<usize> {
+        if let Some(&idx) = self.path_indices.get(path) {
+            return Some(idx);
+        }
+        let clean = strip_unc_prefix(path);
+        if let Some(&idx) = self.path_indices.get(&clean) {
+            return Some(idx);
+        }
+        let norm = normalize_path(path);
+        if let Some(&idx) = self.path_indices.get(&norm) {
+            return Some(idx);
+        }
+        self.items.iter().position(|it| it.path == clean || it.path == norm)
     }
 
     pub fn open_folder(&mut self, folder: &Path, select_image: Option<&Path>) -> bool {
@@ -90,19 +157,22 @@ impl Catalog {
 
         if self.items.is_empty() {
             self.current_index = None;
+            self.sync_metadata();
             return;
         }
+
+        self.sync_metadata();
 
         // Selection logic:
         // 1. If target_to_select is specified, try to find it.
         // 2. If deleted, select next image in natural order (or first if was at end).
         // 3. Otherwise select first (index 0).
         if let Some(target) = target_to_select {
-            let target_norm = normalize_path(target);
-            if let Some(idx) = self.items.iter().position(|it| it.path == target_norm) {
+            if let Some(idx) = self.find_index_by_path(target) {
                 self.current_index = Some(idx);
                 return;
             } else {
+                let target_norm = normalize_path(target);
                 // If previous image was deleted, find the one that would naturally come after it
                 let next_idx = self
                     .items
@@ -164,8 +234,7 @@ impl Catalog {
     }
 
     pub fn select_by_path(&mut self, path: &Path) -> bool {
-        let norm = normalize_path(path);
-        if let Some(idx) = self.items.iter().position(|it| it.path == norm) {
+        if let Some(idx) = self.find_index_by_path(path) {
             self.current_index = Some(idx);
             true
         } else {
@@ -197,9 +266,13 @@ impl Catalog {
             true
         };
 
-        for item in &mut self.items {
-            if item.path == norm {
-                item.is_excluded = is_now_excluded;
+        if let Some(idx) = self.find_index_by_path(&norm) {
+            self.items[idx].is_excluded = is_now_excluded;
+        } else {
+            for item in &mut self.items {
+                if item.path == norm {
+                    item.is_excluded = is_now_excluded;
+                }
             }
         }
 
@@ -209,9 +282,13 @@ impl Catalog {
     pub fn mark_failed(&mut self, path: &Path, reason: String) {
         let norm = normalize_path(path);
         self.failed_decodes.insert(norm.clone(), reason.clone());
-        for item in &mut self.items {
-            if item.path == norm {
-                item.failure_reason = Some(reason.clone());
+        if let Some(idx) = self.find_index_by_path(&norm) {
+            self.items[idx].failure_reason = Some(reason);
+        } else {
+            for item in &mut self.items {
+                if item.path == norm {
+                    item.failure_reason = Some(reason.clone());
+                }
             }
         }
     }

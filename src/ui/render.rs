@@ -142,14 +142,34 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
         let win_h = cr.bottom.max(1);
         let dpi = get_window_dpi(hwnd);
 
-        // Double-buffered memory DC
-        let mem_dc = CreateCompatibleDC(Some(hdc));
-        let mem_bmp = CreateCompatibleBitmap(hdc, win_w, win_h);
-        let old_bmp = SelectObject(mem_dc, mem_bmp.into());
+        // Double-buffered memory DC from persistent cache
+        if state.gdi_cache.mem_dc.0.is_null() {
+            state.gdi_cache.mem_dc = CreateCompatibleDC(Some(hdc));
+        }
+        if state.gdi_cache.bmp_width != win_w
+            || state.gdi_cache.bmp_height != win_h
+            || state.gdi_cache.mem_bmp.0.is_null()
+        {
+            if !state.gdi_cache.mem_bmp.0.is_null() {
+                let _ = DeleteObject(state.gdi_cache.mem_bmp.into());
+            }
+            state.gdi_cache.mem_bmp = CreateCompatibleBitmap(hdc, win_w, win_h);
+            state.gdi_cache.bmp_width = win_w;
+            state.gdi_cache.bmp_height = win_h;
+            let _ = SelectObject(state.gdi_cache.mem_dc, state.gdi_cache.mem_bmp.into());
+        }
 
-        // Modern system GUI font (Segoe UI with Meiryo UI fallback)
-        let font = create_gui_font(hwnd, 10, 400);
-        let old_font = SelectObject(mem_dc, font.into());
+        let mem_dc = state.gdi_cache.mem_dc;
+
+        // Modern system GUI font from persistent cache
+        if state.gdi_cache.font.0.is_null() || state.gdi_cache.font_dpi != dpi {
+            if !state.gdi_cache.font.0.is_null() {
+                let _ = DeleteObject(state.gdi_cache.font.into());
+            }
+            state.gdi_cache.font = create_gui_font(hwnd, 10, 400);
+            state.gdi_cache.font_dpi = dpi;
+        }
+        let _ = SelectObject(mem_dc, state.gdi_cache.font.into());
 
         // Fill background with Google Material 3 Deep Surface
         let bg_brush = CreateSolidBrush(M3_BG);
@@ -450,12 +470,6 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
 
         // Blit back to screen
         let _ = BitBlt(hdc, 0, 0, win_w, win_h, Some(mem_dc), 0, 0, SRCCOPY);
-
-        let _ = SelectObject(mem_dc, old_font);
-        let _ = DeleteObject(font.into());
-        let _ = SelectObject(mem_dc, old_bmp);
-        let _ = DeleteObject(mem_bmp.into());
-        let _ = DeleteDC(mem_dc);
     }
 }
 
@@ -706,8 +720,8 @@ unsafe fn fill_alpha_rect(hdc: HDC, rect: &RECT, color: COLORREF, alpha: u8) {
         }
         let mut bi = BITMAPINFO::default();
         bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-        bi.bmiHeader.biWidth = w;
-        bi.bmiHeader.biHeight = -h;
+        bi.bmiHeader.biWidth = 1;
+        bi.bmiHeader.biHeight = -1;
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB.0;
@@ -720,18 +734,16 @@ unsafe fn fill_alpha_rect(hdc: HDC, rect: &RECT, color: COLORREF, alpha: u8) {
             let r = (color.0 & 0xFF) as u8;
             let g = ((color.0 >> 8) & 0xFF) as u8;
             let b = ((color.0 >> 16) & 0xFF) as u8;
-            let p = bits as *mut u32;
             let pixel = ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
-            for i in 0..(w * h) as isize {
-                *p.offset(i) = pixel;
-            }
+            *(bits as *mut u32) = pixel;
+
             let blend = BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8,
                 BlendFlags: 0,
                 SourceConstantAlpha: alpha,
                 AlphaFormat: 0,
             };
-            let _ = AlphaBlend(hdc, rect.left, rect.top, w, h, mem_dc, 0, 0, w, h, blend);
+            let _ = AlphaBlend(hdc, rect.left, rect.top, w, h, mem_dc, 0, 0, 1, 1, blend);
             SelectObject(mem_dc, old_bmp);
             let _ = DeleteObject(bmp.into());
         }

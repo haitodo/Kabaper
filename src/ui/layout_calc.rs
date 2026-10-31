@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -536,33 +536,17 @@ pub fn compute_sidebar_layout(
     };
     let list_h = (list_rect.bottom - list_rect.top).max(0);
 
-    let mut groups: Vec<(PathBuf, String, Vec<usize>)> = Vec::new();
-    let root_opt = &catalog.folder;
-
-    for (idx, item) in catalog.items.iter().enumerate() {
-        let parent = item.path.parent().unwrap_or(Path::new("")).to_path_buf();
-        if let Some(last_group) = groups.last_mut() {
-            if last_group.0 == parent {
-                last_group.2.push(idx);
-                continue;
-            }
-        }
-        let display_name = if let Some(root) = root_opt {
-            if &parent == root {
-                let name = root.file_name().and_then(|n| n.to_str()).unwrap_or("ルート");
-                format!("📁 {} (直下)", name)
-            } else if let Ok(rel) = parent.strip_prefix(root) {
-                format!("📁 {}", rel.to_string_lossy())
-            } else {
-                let name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("フォルダ");
-                format!("📁 {}", name)
-            }
-        } else {
-            let name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("フォルダ");
-            format!("📁 {}", name)
-        };
-        groups.push((parent, display_name, vec![idx]));
-    }
+    let fallback_groups;
+    let groups: &[_] = if !catalog.folder_groups.is_empty() {
+        &catalog.folder_groups
+    } else if !catalog.items.is_empty() {
+        let mut temp_cat = catalog.clone();
+        temp_cat.rebuild_folder_groups();
+        fallback_groups = temp_cat.folder_groups;
+        &fallback_groups
+    } else {
+        &[]
+    };
 
     let folder_h = scale_by_dpi(28, dpi);
     let item_h = scale_by_dpi(44, dpi);
@@ -570,17 +554,17 @@ pub fn compute_sidebar_layout(
     let mut y_accum = 0;
     let mut rows = Vec::new();
 
-    for (folder_path, display_name, item_indices) in groups {
-        let item_count = item_indices.len();
-        let is_collapsed = collapsed_folders.contains(&folder_path);
+    for group in groups {
+        let item_count = group.item_indices.len();
+        let is_collapsed = collapsed_folders.contains(&group.folder_path);
 
         let row_top = list_rect.top + y_accum - scroll_offset;
         let row_bottom = row_top + folder_h;
         if row_bottom >= list_rect.top && row_top <= list_rect.bottom {
             rows.push(SidebarRowLayout {
                 kind: SidebarRowKind::FolderHeader {
-                    folder_path: folder_path.clone(),
-                    display_name,
+                    folder_path: group.folder_path.clone(),
+                    display_name: group.display_name.clone(),
                     item_count,
                     is_collapsed,
                 },
@@ -595,7 +579,7 @@ pub fn compute_sidebar_layout(
         y_accum += folder_h;
 
         if !is_collapsed {
-            for idx in item_indices {
+            for &idx in &group.item_indices {
                 let item = &catalog.items[idx];
                 let item_top = list_rect.top + y_accum - scroll_offset;
                 let item_bottom = item_top + item_h;
