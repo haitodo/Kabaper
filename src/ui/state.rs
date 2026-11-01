@@ -144,20 +144,20 @@ impl AppState {
 
         let wallpaper_mgr = WallpaperManager::new().ok();
         let is_portable = storage.root_dir.ends_with("data");
-        let scheduler_mgr = if config.schedule.enabled {
+        let scheduler_mgr = {
             let mgr = SchedulerManager::new(&storage.root_dir, is_portable).ok();
             if let Some(sched) = &mgr {
-                if let Ok(exe) = std::env::current_exe()
-                    && let Err(e) = sched.check_and_repair_exe_path(&exe)
-                {
-                    error_banner.push(format!("タスクスケジューラ検証エラー: {}", e));
+                if config.schedule.enabled {
+                    if let Ok(exe) = std::env::current_exe() {
+                        if let Err(e) = sched.sync_schedule(&config.schedule, &exe) {
+                            error_banner.push(format!("タスクスケジューラ同期エラー: {}", e));
+                        }
+                    }
                 }
-            } else {
+            } else if config.schedule.enabled {
                 error_banner.push("タスクスケジューラサービスに接続できません".into());
             }
             mgr
-        } else {
-            None
         };
 
         let (prefetch_tx, prefetch_rx) = mpsc::channel();

@@ -107,8 +107,21 @@ impl SchedulerManager {
             let triggers = task_def.Triggers()?;
 
             if cfg.on_logon {
-                let logon_trig = triggers.Create(TASK_TRIGGER_LOGON)?;
-                let _ = logon_trig.SetEnabled(VARIANT_BOOL::from(true));
+                let trigger = triggers.Create(TASK_TRIGGER_LOGON)?;
+                let _ = trigger.SetEnabled(VARIANT_BOOL::from(true));
+                if let Ok(logon_trig) = trigger.cast::<ILogonTrigger>() {
+                    // Windows requires a specific UserId for non-elevated LUA execution;
+                    // otherwise it defaults to monitoring logon of ANY user which requires admin privileges (0x80070005).
+                    if let Ok(username) = std::env::var("USERNAME") {
+                        let user_str = if let Ok(domain) = std::env::var("USERDOMAIN") {
+                            format!("{}\\{}", domain, username)
+                        } else {
+                            username
+                        };
+                        let user_bstr = BSTR::from(user_str.as_str());
+                        let _ = logon_trig.SetUserId(&user_bstr);
+                    }
+                }
             }
 
             if cfg.interval_minutes > 0 {
@@ -217,5 +230,31 @@ mod tests {
         if let Ok(s) = sched {
             println!("Task Scheduler service connected: {}", s.task_name);
         }
+    }
+
+    #[test]
+    fn test_scheduler_registration_with_logon_trigger() {
+        let temp = std::env::temp_dir().join(format!("kabaper_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp);
+        if let Ok(sched) = SchedulerManager::new(&temp, true) {
+            let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("kabaper.exe"));
+            let cfg = ScheduleConfig {
+                enabled: true,
+                on_logon: true,
+                interval_minutes: 60,
+            };
+            // Spec 6.3: register_or_update_task with on_logon should succeed without E_ACCESSDENIED
+            let res = sched.sync_schedule(&cfg, &exe);
+            assert!(
+                res.is_ok(),
+                "Task registration with on_logon failed: {:?}",
+                res.err()
+            );
+
+            // Clean up registered test task
+            let del_res = sched.delete_task();
+            assert!(del_res.is_ok(), "delete_task failed: {:?}", del_res.err());
+        }
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }
