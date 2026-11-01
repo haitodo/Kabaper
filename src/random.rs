@@ -78,18 +78,25 @@ pub fn execute_random_update(
 
     // 3. Fast candidate enumeration (Spec 6.1)
     // Avoid heavy natural sort and folder grouping metadata computation
-    let excluded_set: HashSet<PathBuf> = cfg
-        .library
-        .excluded
-        .iter()
-        .map(|s| normalize_path(Path::new(s)))
-        .collect();
+    let mut excluded_set: HashSet<PathBuf> = HashSet::with_capacity(cfg.library.excluded.len() * 2);
+    for s in &cfg.library.excluded {
+        let p = Path::new(s);
+        let norm = normalize_path(p);
+        let clean = crate::catalog::strip_unc_prefix(&norm);
+        excluded_set.insert(norm);
+        excluded_set.insert(clean);
+        excluded_set.insert(p.to_path_buf());
+    }
 
     let raw_images = collect_images_recursive(&folder);
-    let mut valid_candidates: Vec<PathBuf> = raw_images
-        .into_iter()
-        .filter(|p| !excluded_set.contains(p) && !excluded_set.contains(&normalize_path(p)))
-        .collect();
+    let mut valid_candidates: Vec<PathBuf> = if excluded_set.is_empty() {
+        raw_images
+    } else {
+        raw_images
+            .into_iter()
+            .filter(|p| !excluded_set.contains(p))
+            .collect()
+    };
 
     if valid_candidates.is_empty() {
         return Err(RandomUpdateError::ZeroCandidates(

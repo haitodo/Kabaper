@@ -43,6 +43,7 @@ pub struct AppState {
     pub layout_frames: Vec<FrameInput>,
     pub selected_frame_idx: usize,
     pub cached_images: HashMap<ImageId, DecodedImage>,
+    pub spec_cache: HashMap<PathBuf, ImageSpec>,
     pub active_plan: Option<LayoutPlan>,
     pub active_base_layer: Option<ComposedBitmap>,
     pub active_composed: Option<ComposedBitmap>,
@@ -143,18 +144,21 @@ impl AppState {
 
         let wallpaper_mgr = WallpaperManager::new().ok();
         let is_portable = storage.root_dir.ends_with("data");
-        let scheduler_mgr = SchedulerManager::new(&storage.root_dir, is_portable).ok();
-
-        // Check scheduler exe path repair
-        if let Some(sched) = &scheduler_mgr {
-            if let Ok(exe) = std::env::current_exe()
-                && let Err(e) = sched.check_and_repair_exe_path(&exe)
-            {
-                error_banner.push(format!("タスクスケジューラ検証エラー: {}", e));
+        let scheduler_mgr = if config.schedule.enabled {
+            let mgr = SchedulerManager::new(&storage.root_dir, is_portable).ok();
+            if let Some(sched) = &mgr {
+                if let Ok(exe) = std::env::current_exe()
+                    && let Err(e) = sched.check_and_repair_exe_path(&exe)
+                {
+                    error_banner.push(format!("タスクスケジューラ検証エラー: {}", e));
+                }
+            } else {
+                error_banner.push("タスクスケジューラサービスに接続できません".into());
             }
-        } else if config.schedule.enabled {
-            error_banner.push("タスクスケジューラサービスに接続できません".into());
-        }
+            mgr
+        } else {
+            None
+        };
 
         let (prefetch_tx, prefetch_rx) = mpsc::channel();
         let latest_prefetch_req = Arc::new(AtomicU64::new(0));
@@ -170,6 +174,7 @@ impl AppState {
             layout_frames: Vec::new(),
             selected_frame_idx: 0,
             cached_images: HashMap::new(),
+            spec_cache: HashMap::new(),
             active_plan: None,
             active_base_layer: None,
             active_composed: None,
@@ -239,6 +244,24 @@ impl AppState {
         Ok(state)
     }
 
+    pub fn get_or_read_image_spec(&mut self, path: &Path) -> windows::core::Result<ImageSpec> {
+        if let Some(spec) = self.spec_cache.get(path) {
+            return Ok(spec.clone());
+        }
+        let id = ImageId(path.to_string_lossy().to_string());
+        if let Some(dec) = self.cached_images.get(&id) {
+            let spec = ImageSpec {
+                id,
+                size_px: dec.orig_size,
+            };
+            self.spec_cache.insert(path.to_path_buf(), spec.clone());
+            return Ok(spec);
+        }
+        let spec = self.decoder.read_image_spec(path)?;
+        self.spec_cache.insert(path.to_path_buf(), spec.clone());
+        Ok(spec)
+    }
+
     pub fn set_osd(&mut self, text: String, duration_secs: u64, has_undo: bool) {
         self.osd = Some((
             text,
@@ -297,6 +320,7 @@ impl AppState {
                 if let Some(parent) = p.parent()
                     && self.catalog.open_folder(parent, Some(p))
                 {
+                    self.spec_cache.clear();
                     self.add_recent_folder(parent);
                     self.config.library.folder = Some(parent.to_string_lossy().to_string());
                     self.config.library.last_image = Some(p.to_string_lossy().to_string());
@@ -313,6 +337,7 @@ impl AppState {
             }
         } else if p.is_dir() {
             if self.catalog.open_folder(p, None) {
+                self.spec_cache.clear();
                 self.add_recent_folder(p);
                 self.config.library.folder = Some(p.to_string_lossy().to_string());
                 self.config.library.last_image = self
@@ -369,10 +394,8 @@ impl AppState {
 
         // Prepare frames
         if reset_frames || self.layout_frames.is_empty() {
-            let cur_spec = self
-                .catalog
-                .current_item()
-                .and_then(|it| self.decoder.read_image_spec(&it.path).ok());
+            let cur_path = self.catalog.current_item().map(|it| it.path.clone());
+            let cur_spec = cur_path.and_then(|p| self.get_or_read_image_spec(&p).ok());
             self.layout_frames = vec![FrameInput {
                 image: cur_spec,
                 pinned: false,
@@ -395,12 +418,12 @@ impl AppState {
             for step in 1..self.catalog.items.len().min(10) {
                 let idx = (cur_idx + step) % self.catalog.items.len();
                 let item = &self.catalog.items[idx];
-                if !item.is_excluded
-                    && item.failure_reason.is_none()
-                    && !used_paths.contains(&item.path)
-                    && let Ok(spec) = self.decoder.read_image_spec(&item.path)
-                {
-                    used_paths.insert(item.path.clone());
+                if item.is_excluded || item.failure_reason.is_some() || used_paths.contains(&item.path) {
+                    continue;
+                }
+                let item_path = item.path.clone();
+                if let Ok(spec) = self.get_or_read_image_spec(&item_path) {
+                    used_paths.insert(item_path);
                     candidate_specs.push(spec);
                 }
             }
@@ -416,30 +439,6 @@ impl AppState {
 
         let plan = plan_layout(&req, &candidate_specs);
 
-        // Preload/decode images needed by the plan
-        for frame in &plan.frames {
-            if let Some(placed) = &frame.content {
-                let p = PathBuf::from(&placed.id.0);
-                if !self.cached_images.contains_key(&placed.id)
-                    && let Ok(decoded) = self.decoder.decode_image(&p, Some(4096))
-                {
-                    self.cached_images.insert(placed.id.clone(), decoded);
-                }
-            }
-        }
-
-        // Re-compose layout bitmap using base layer cache for instant pan updates
-        let has_blur = plan_has_background_blur(&plan);
-        let (base_layer, mut composed) = if has_blur {
-            let base = compose_base_layer(&plan, &self.cached_images, self.config.layout.dim_ratio);
-            let comp = base.clone();
-            (Some(base), comp)
-        } else {
-            let comp = ComposedBitmap::new(mw, mh);
-            (None, comp)
-        };
-        compose_foreground_layer(&mut composed, &plan, &self.cached_images);
-
         // Sync frames back
         self.layout_frames = plan
             .frames
@@ -451,6 +450,12 @@ impl AppState {
                         .cached_images
                         .get(&c.id)
                         .map(|img| img.orig_size)
+                        .or_else(|| {
+                            candidate_specs
+                                .iter()
+                                .find(|s| s.id == c.id)
+                                .map(|s| s.size_px)
+                        })
                         .unwrap_or((1, 1)),
                 }),
                 pinned: f.pinned,
@@ -463,8 +468,41 @@ impl AppState {
         }
 
         self.active_plan = Some(plan);
-        self.active_base_layer = base_layer;
-        self.active_composed = Some(composed);
+
+        // Lazy composition: only decode all frames and compose 4K bitmap in composite mode
+        if self.view_mode == ViewMode::Composite {
+            let plan_ref = self.active_plan.as_ref().unwrap();
+            // Preload/decode images needed by the plan
+            for frame in &plan_ref.frames {
+                if let Some(placed) = &frame.content {
+                    let p = PathBuf::from(&placed.id.0);
+                    if !self.cached_images.contains_key(&placed.id)
+                        && let Ok(decoded) = self.decoder.decode_image(&p, Some(4096))
+                    {
+                        self.cached_images.insert(placed.id.clone(), decoded);
+                    }
+                }
+            }
+
+            // Re-compose layout bitmap using base layer cache for instant pan updates
+            let has_blur = plan_has_background_blur(plan_ref);
+            let (base_layer, mut composed) = if has_blur {
+                let base = compose_base_layer(plan_ref, &self.cached_images, self.config.layout.dim_ratio);
+                let comp = base.clone();
+                (Some(base), comp)
+            } else {
+                let comp = ComposedBitmap::new(mw, mh);
+                (None, comp)
+            };
+            compose_foreground_layer(&mut composed, plan_ref, &self.cached_images);
+
+            self.active_base_layer = base_layer;
+            self.active_composed = Some(composed);
+        } else {
+            self.active_base_layer = None;
+            self.active_composed = None;
+            self.ensure_current_image_loaded();
+        }
 
         self.prefetch_adjacent_images();
         self.prune_image_cache();
@@ -733,7 +771,7 @@ impl AppState {
                 self.catalog
                     .find_next_valid_image(start_idx, true, &other_used)
                 && current_path.as_ref() != Some(&next_path)
-                && let Ok(spec) = self.decoder.read_image_spec(&next_path)
+                && let Ok(spec) = self.get_or_read_image_spec(&next_path)
             {
                 if self.selected_frame_idx < self.layout_frames.len() {
                     self.layout_frames[self.selected_frame_idx].image = Some(spec);
@@ -790,7 +828,7 @@ impl AppState {
                 self.catalog
                     .find_next_valid_image(start_idx, false, &other_used)
                 && current_path.as_ref() != Some(&prev_path)
-                && let Ok(spec) = self.decoder.read_image_spec(&prev_path)
+                && let Ok(spec) = self.get_or_read_image_spec(&prev_path)
             {
                 if self.selected_frame_idx < self.layout_frames.len() {
                     self.layout_frames[self.selected_frame_idx].image = Some(spec);
@@ -842,7 +880,7 @@ impl AppState {
                     .and_then(|f| f.image.as_ref())
                     .map(|img| PathBuf::from(&img.id.0));
                 if current_path.as_ref() != Some(&first_path)
-                    && let Ok(spec) = self.decoder.read_image_spec(&first_path)
+                    && let Ok(spec) = self.get_or_read_image_spec(&first_path)
                 {
                     if self.selected_frame_idx < self.layout_frames.len() {
                         self.layout_frames[self.selected_frame_idx].image = Some(spec);
@@ -896,7 +934,7 @@ impl AppState {
                     .and_then(|f| f.image.as_ref())
                     .map(|img| PathBuf::from(&img.id.0));
                 if current_path.as_ref() != Some(&last_path)
-                    && let Ok(spec) = self.decoder.read_image_spec(&last_path)
+                    && let Ok(spec) = self.get_or_read_image_spec(&last_path)
                 {
                     if self.selected_frame_idx < self.layout_frames.len() {
                         self.layout_frames[self.selected_frame_idx].image = Some(spec);
@@ -978,7 +1016,7 @@ impl AppState {
                     self.set_osd("変更可能な別候補がありません".to_string(), 2, false);
                     return;
                 }
-                if let Ok(spec) = self.decoder.read_image_spec(&next_path) {
+                if let Ok(spec) = self.get_or_read_image_spec(&next_path) {
                     if self.selected_frame_idx < self.layout_frames.len() {
                         self.layout_frames[self.selected_frame_idx].image = Some(spec);
                         self.layout_frames[self.selected_frame_idx].pan = (0.5, 0.5);
@@ -1172,7 +1210,7 @@ impl AppState {
         self.layout_frames.clear();
         for fp in &preset.frames {
             let spec = if let Some(path_str) = &fp.image_path {
-                self.decoder.read_image_spec(Path::new(path_str)).ok()
+                self.get_or_read_image_spec(Path::new(path_str)).ok()
             } else {
                 None
             };
@@ -1880,7 +1918,7 @@ impl AppState {
             }
         } else {
             let next_path = self.catalog.items[target_idx].path.clone();
-            if let Ok(spec) = self.decoder.read_image_spec(&next_path) {
+            if let Ok(spec) = self.get_or_read_image_spec(&next_path) {
                 if self.selected_frame_idx < self.layout_frames.len() {
                     self.layout_frames[self.selected_frame_idx].image = Some(spec);
                     self.layout_frames[self.selected_frame_idx].pan = (0.5, 0.5);
@@ -1900,7 +1938,7 @@ impl AppState {
         }
         self.selected_frame_idx = frame_idx;
         let next_path = self.catalog.items[target_idx].path.clone();
-        if let Ok(spec) = self.decoder.read_image_spec(&next_path) {
+        if let Ok(spec) = self.get_or_read_image_spec(&next_path) {
             self.layout_frames[frame_idx].image = Some(spec);
             self.layout_frames[frame_idx].pan = (0.5, 0.5);
             if frame_idx == 0 {

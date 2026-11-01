@@ -22,11 +22,10 @@ impl ComposedBitmap {
         let size = (width as usize) * (height as usize);
         let mut pixels = vec![0u8; size * 4];
         let row_stride = (width as usize) * 4;
-        // Initialize with opaque black (B=0, G=0, R=0, A=255) by rows in parallel
+        // Initialize with opaque black (B=0, G=0, R=0, A=255) by rows in parallel (0xFF000000)
         pixels.par_chunks_exact_mut(row_stride).for_each(|row| {
-            for chunk in row.chunks_exact_mut(4) {
-                chunk[3] = 255;
-            }
+            let (_, u32_row, _) = unsafe { row.align_to_mut::<u32>() };
+            u32_row.fill(0xFF000000);
         });
         Self {
             width,
@@ -160,12 +159,9 @@ pub fn compose_single_frame_foreground(
         target_slice
             .par_chunks_exact_mut(row_stride)
             .for_each(|target_row| {
-                for chunk in target_row[byte_start..byte_end].chunks_exact_mut(4) {
-                    chunk[0] = 0;
-                    chunk[1] = 0;
-                    chunk[2] = 0;
-                    chunk[3] = 255;
-                }
+                let sub = &mut target_row[byte_start..byte_end];
+                let (_, u32_sub, _) = unsafe { sub.align_to_mut::<u32>() };
+                u32_sub.fill(0xFF000000);
             });
     }
 
@@ -347,7 +343,30 @@ fn render_background_blur(
     if min_x < max_x && min_y < max_y {
         let sw_f = slot.width as f64;
         let sh_f = slot.height as f64;
-        let dim_factor = (1.0 - dim_ratio).clamp(0.0, 1.0);
+        let dim_factor = (1.0 - dim_ratio).clamp(0.0, 1.0) as f32;
+
+        struct XSampleBlur {
+            x0_idx: usize,
+            x1_idx: usize,
+            fx: f32,
+        }
+
+        let mut x_table = Vec::with_capacity((max_x - min_x) as usize);
+        for x in min_x..max_x {
+            let u = ((x as i32 - slot.x) as f64 + 0.5) / sw_f;
+            let bx = u * (small_w as f64);
+            let px = (bx - 0.5).clamp(0.0, (small_w - 1) as f64);
+            let x0 = px.floor() as usize;
+            let x1 = (x0 + 1).min(small_w as usize - 1);
+            let fx = (px - x0 as f64) as f32;
+            x_table.push(XSampleBlur {
+                x0_idx: x0 * 3,
+                x1_idx: x1 * 3,
+                fx,
+            });
+        }
+
+        let small_stride = (small_w as usize) * 3;
         let target_w = target.width as usize;
         let row_stride = target_w * 4;
 
@@ -359,23 +378,55 @@ fn render_background_blur(
                 let y = min_y + i as u32;
                 let v = ((y as i32 - slot.y) as f64 + 0.5) / sh_f;
                 let by = v * (small_h as f64);
+                let py = (by - 0.5).clamp(0.0, (small_h - 1) as f64);
+                let y0 = py.floor() as usize;
+                let y1 = (y0 + 1).min(small_h as usize - 1);
+                let fy = (py - y0 as f64) as f32;
+                let inv_fy = 1.0 - fy;
+
+                let row0 = &blurred[y0 * small_stride..(y0 + 1) * small_stride];
+                let row1 = &blurred[y1 * small_stride..(y1 + 1) * small_stride];
+
                 let target_subrow = &mut row_slice[(min_x as usize) * 4..(max_x as usize) * 4];
 
-                for (x_offset, out_pixel) in target_subrow.chunks_exact_mut(4).enumerate() {
-                    let x = min_x + x_offset as u32;
-                    let u = ((x as i32 - slot.x) as f64 + 0.5) / sw_f;
-                    let bx = u * (small_w as f64);
+                for (sample, out_pixel) in x_table.iter().zip(target_subrow.chunks_exact_mut(4)) {
+                    let fx = sample.fx;
+                    let inv_fx = 1.0 - fx;
 
-                    let (b, g, r) = sample_small_bilinear(&blurred, small_w, small_h, bx, by);
+                    let w00 = inv_fx * inv_fy;
+                    let w10 = fx * inv_fy;
+                    let w01 = inv_fx * fy;
+                    let w11 = fx * fy;
+
+                    let b00 = row0[sample.x0_idx] as f32;
+                    let g00 = row0[sample.x0_idx + 1] as f32;
+                    let r00 = row0[sample.x0_idx + 2] as f32;
+
+                    let b10 = row0[sample.x1_idx] as f32;
+                    let g10 = row0[sample.x1_idx + 1] as f32;
+                    let r10 = row0[sample.x1_idx + 2] as f32;
+
+                    let b01 = row1[sample.x0_idx] as f32;
+                    let g01 = row1[sample.x0_idx + 1] as f32;
+                    let r01 = row1[sample.x0_idx + 2] as f32;
+
+                    let b11 = row1[sample.x1_idx] as f32;
+                    let g11 = row1[sample.x1_idx + 1] as f32;
+                    let r11 = row1[sample.x1_idx + 2] as f32;
+
+                    let mut b = b00 * w00 + b10 * w10 + b01 * w01 + b11 * w11;
+                    let mut g = g00 * w00 + g10 * w10 + g01 * w01 + g11 * w11;
+                    let mut r = r00 * w00 + r10 * w10 + r01 * w01 + r11 * w11;
+
                     if dim_ratio > 0.0 {
-                        out_pixel[0] = (b as f64 * dim_factor).round() as u8;
-                        out_pixel[1] = (g as f64 * dim_factor).round() as u8;
-                        out_pixel[2] = (r as f64 * dim_factor).round() as u8;
-                    } else {
-                        out_pixel[0] = b;
-                        out_pixel[1] = g;
-                        out_pixel[2] = r;
+                        b *= dim_factor;
+                        g *= dim_factor;
+                        r *= dim_factor;
                     }
+
+                    out_pixel[0] = b.round().clamp(0.0, 255.0) as u8;
+                    out_pixel[1] = g.round().clamp(0.0, 255.0) as u8;
+                    out_pixel[2] = r.round().clamp(0.0, 255.0) as u8;
                     out_pixel[3] = 255;
                 }
             });
@@ -541,6 +592,7 @@ fn gaussian_blur_rgb(src: &[u8], width: u32, height: u32, sigma: f64) -> Vec<u8>
     out
 }
 
+#[allow(dead_code)]
 #[inline]
 fn sample_small_bilinear(src: &[u8], w: u32, h: u32, x: f64, y: f64) -> (u8, u8, u8) {
     let px = (x - 0.5).clamp(0.0, (w - 1) as f64);

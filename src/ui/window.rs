@@ -387,7 +387,13 @@ unsafe extern "system" fn wnd_proc(
                 let dpi = get_window_dpi(hwnd);
                 let sidebar_w = if state.show_sidebar { get_sidebar_width(dpi) } else { 0 };
                 let bar_h = if state.bar_visible { get_bar_height(dpi) } else { 0 };
-                let is_hovered = if state.show_sidebar && x < sidebar_w && y >= bar_h {
+                let margin = scale_by_dpi(24, dpi);
+                let in_potential_scrollbar_area = state.show_sidebar
+                    && x >= (sidebar_w - margin)
+                    && x < sidebar_w
+                    && y >= bar_h;
+
+                let is_hovered = if in_potential_scrollbar_area {
                     let mut cr = RECT::default();
                     let _ = GetClientRect(hwnd, &mut cr);
                     let pinned_paths: HashSet<PathBuf> = state
@@ -1069,6 +1075,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                     VK_F5 => {
                         state.catalog.reload();
+                        state.spec_cache.clear();
                         state.rebuild_layout(true, true);
                         state.set_osd("フォルダを再読込しました".into(), 2, false);
                     }

@@ -707,35 +707,72 @@ fn draw_bar_btn(hdc: HDC, x: i32, y: i32, w: i32, h: i32, text: &str) {
     }
 }
 
+struct AlphaCache {
+    dc: HDC,
+    bmp: HBITMAP,
+    bits: *mut u32,
+}
+
+impl Drop for AlphaCache {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteDC(self.dc);
+            let _ = DeleteObject(self.bmp.into());
+        }
+    }
+}
+
+thread_local! {
+    static ALPHA_CACHE: std::cell::RefCell<Option<AlphaCache>> = const { std::cell::RefCell::new(None) };
+}
+
 unsafe fn fill_alpha_rect(hdc: HDC, rect: &RECT, color: COLORREF, alpha: u8) {
     let w = rect.right - rect.left;
     let h = rect.bottom - rect.top;
     if w <= 0 || h <= 0 {
         return;
     }
-    unsafe {
-        let mem_dc = CreateCompatibleDC(Some(hdc));
-        if mem_dc.is_invalid() {
-            return;
-        }
-        let mut bi = BITMAPINFO::default();
-        bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-        bi.bmiHeader.biWidth = 1;
-        bi.bmiHeader.biHeight = -1;
-        bi.bmiHeader.biPlanes = 1;
-        bi.bmiHeader.biBitCount = 32;
-        bi.bmiHeader.biCompression = BI_RGB.0;
+    ALPHA_CACHE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let cache = match borrow.as_mut() {
+            Some(c) => c,
+            None => {
+                let mem_dc = unsafe { CreateCompatibleDC(None) };
+                if mem_dc.is_invalid() {
+                    return;
+                }
+                let mut bi = BITMAPINFO::default();
+                bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+                bi.bmiHeader.biWidth = 1;
+                bi.bmiHeader.biHeight = -1;
+                bi.bmiHeader.biPlanes = 1;
+                bi.bmiHeader.biBitCount = 32;
+                bi.bmiHeader.biCompression = BI_RGB.0;
 
-        let mut bits = std::ptr::null_mut();
-        if let Ok(bmp) = CreateDIBSection(Some(mem_dc), &bi, DIB_RGB_COLORS, &mut bits, None, 0)
-            && !bits.is_null()
-        {
-            let old_bmp = SelectObject(mem_dc, bmp.into());
+                let mut bits = std::ptr::null_mut();
+                let bmp = match unsafe { CreateDIBSection(Some(mem_dc), &bi, DIB_RGB_COLORS, &mut bits, None, 0) } {
+                    Ok(b) if !bits.is_null() => b,
+                    _ => {
+                        let _ = unsafe { DeleteDC(mem_dc) };
+                        return;
+                    }
+                };
+                let _ = unsafe { SelectObject(mem_dc, bmp.into()) };
+                *borrow = Some(AlphaCache {
+                    dc: mem_dc,
+                    bmp,
+                    bits: bits as *mut u32,
+                });
+                borrow.as_mut().unwrap()
+            }
+        };
+
+        unsafe {
             let r = (color.0 & 0xFF) as u8;
             let g = ((color.0 >> 8) & 0xFF) as u8;
             let b = ((color.0 >> 16) & 0xFF) as u8;
             let pixel = ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
-            *(bits as *mut u32) = pixel;
+            *cache.bits = pixel;
 
             let blend = BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8,
@@ -743,12 +780,9 @@ unsafe fn fill_alpha_rect(hdc: HDC, rect: &RECT, color: COLORREF, alpha: u8) {
                 SourceConstantAlpha: alpha,
                 AlphaFormat: 0,
             };
-            let _ = AlphaBlend(hdc, rect.left, rect.top, w, h, mem_dc, 0, 0, 1, 1, blend);
-            SelectObject(mem_dc, old_bmp);
-            let _ = DeleteObject(bmp.into());
+            let _ = AlphaBlend(hdc, rect.left, rect.top, w, h, cache.dc, 0, 0, 1, 1, blend);
         }
-        let _ = DeleteDC(mem_dc);
-    }
+    });
 }
 
 fn draw_overlay_btn(hdc: HDC, x: i32, y: i32, w: i32, h: i32, text: &str) {

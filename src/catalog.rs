@@ -472,10 +472,12 @@ pub fn is_supported_image(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
     };
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "jpg" | "jpeg" | "png" | "bmp" | "webp" | "avif"
-    )
+    ext.eq_ignore_ascii_case("jpg")
+        || ext.eq_ignore_ascii_case("jpeg")
+        || ext.eq_ignore_ascii_case("png")
+        || ext.eq_ignore_ascii_case("bmp")
+        || ext.eq_ignore_ascii_case("webp")
+        || ext.eq_ignore_ascii_case("avif")
 }
 
 pub fn normalize_path(path: &Path) -> PathBuf {
