@@ -444,19 +444,32 @@ impl AppState {
             .frames
             .iter()
             .map(|f| FrameInput {
-                image: f.content.as_ref().map(|c| ImageSpec {
-                    id: c.id.clone(),
-                    size_px: self
-                        .cached_images
-                        .get(&c.id)
-                        .map(|img| img.orig_size)
-                        .or_else(|| {
-                            candidate_specs
-                                .iter()
-                                .find(|s| s.id == c.id)
-                                .map(|s| s.size_px)
-                        })
-                        .unwrap_or((1, 1)),
+                image: f.content.as_ref().map(|c| {
+                    if let Some(orig) = req
+                        .frames
+                        .iter()
+                        .filter_map(|rf| rf.image.as_ref())
+                        .find(|img| img.id == c.id && img.size_px != (1, 1))
+                    {
+                        orig.clone()
+                    } else if let Some(cand) = candidate_specs.iter().find(|s| s.id == c.id) {
+                        cand.clone()
+                    } else if let Some(img) = self.cached_images.get(&c.id) {
+                        ImageSpec {
+                            id: c.id.clone(),
+                            size_px: img.orig_size,
+                        }
+                    } else if let Some(spec) = self.spec_cache.get(Path::new(&c.id.0)) {
+                        spec.clone()
+                    } else if let Ok(spec) = self.decoder.read_image_spec(Path::new(&c.id.0)) {
+                        self.spec_cache.insert(PathBuf::from(&c.id.0), spec.clone());
+                        spec
+                    } else {
+                        ImageSpec {
+                            id: c.id.clone(),
+                            size_px: (1, 1),
+                        }
+                    }
                 }),
                 pinned: f.pinned,
                 pan: f.pan,

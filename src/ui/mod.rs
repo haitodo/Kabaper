@@ -383,4 +383,83 @@ mod tests {
         state.stop_sidebar_scrollbar_drag();
         let _ = fs::remove_dir_all(&temp);
     }
+
+    fn create_test_bmp_sized(path: &std::path::Path, w: u32, h: u32) {
+        let row_stride = ((w * 3 + 3) / 4) * 4;
+        let data_size = row_stride * h;
+        let file_size = 54 + data_size;
+        let mut data = vec![0u8; file_size as usize];
+        data[0] = 0x42;
+        data[1] = 0x4D;
+        data[2..6].copy_from_slice(&file_size.to_le_bytes());
+        data[10..14].copy_from_slice(&54u32.to_le_bytes());
+        data[14..18].copy_from_slice(&40u32.to_le_bytes());
+        data[18..22].copy_from_slice(&w.to_le_bytes());
+        data[22..26].copy_from_slice(&h.to_le_bytes());
+        data[26..28].copy_from_slice(&1u16.to_le_bytes());
+        data[28..30].copy_from_slice(&24u16.to_le_bytes());
+        data[34..38].copy_from_slice(&data_size.to_le_bytes());
+        std::fs::write(path, data).unwrap();
+    }
+
+    #[test]
+    fn test_composite_scroll_does_not_corrupt_unselected_frame_size_or_cause_blur() {
+        let temp = std::env::temp_dir().join(format!("kabaper_test_blur_repro_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let p1 = temp.join("img1.bmp");
+        let p2 = temp.join("img2.bmp");
+        let p3 = temp.join("img3.bmp");
+        create_test_bmp_sized(&p1, 1920, 1080);
+        create_test_bmp_sized(&p2, 1920, 1080);
+        create_test_bmp_sized(&p3, 1920, 1080);
+
+        let storage_dir = temp.join("storage");
+        let storage = crate::store::Storage::init_with_dir(storage_dir).unwrap();
+        let mut state = AppState::new(storage, crate::store::AppConfig::default(), Some(&temp)).unwrap();
+
+        state.view_mode = ViewMode::Composite;
+        state.config.layout.mode = "split2".to_string();
+        state.config.layout.border_px = 0;
+        state.rebuild_layout(true, true);
+
+        // Get monitor dimensions and slot dimensions
+        let monitor = state.target_monitor().unwrap();
+        let slot_w = monitor.width / 2;
+        let slot_h = monitor.height;
+
+        // Create images matching the exact slot dimension so there's zero margin (no blur)
+        let p_match1 = temp.join("img_match1.bmp");
+        let p_match2 = temp.join("img_match2.bmp");
+        let p_match3 = temp.join("img_match3.bmp");
+        create_test_bmp_sized(&p_match1, slot_w, slot_h);
+        create_test_bmp_sized(&p_match2, slot_w, slot_h);
+        create_test_bmp_sized(&p_match3, slot_w, slot_h);
+
+        // Open directory with matching images
+        state.catalog.open_folder(&temp, Some(&p_match1));
+        state.rebuild_layout(true, true);
+
+        // Initial check: Frame 0 has exact slot size, so blur_sigma must be 0.0
+        let f0_init = state.active_plan.as_ref().unwrap().frames[0].content.as_ref().unwrap();
+        assert_eq!(f0_init.blur_sigma, 0.0, "Initially Frame 0 has no blur");
+
+        // Select frame 1 and scroll (next_image)
+        state.selected_frame_idx = 1;
+        state.next_image();
+
+        // Frame 0 size must remain (slot_w, slot_h), NOT corrupted to (1, 1)
+        let f0_size_after = state.layout_frames[0].image.as_ref().unwrap().size_px;
+        assert_eq!(f0_size_after, (slot_w, slot_h), "Frame 0 size_px must remain intact");
+
+        // Frame 0 must STILL have NO blur (blur_sigma == 0.0)
+        let plan = state.active_plan.as_ref().unwrap();
+        let f0_content = plan.frames[0].content.as_ref().unwrap();
+        assert_eq!(f0_content.blur_sigma, 0.0, "Frame 0 must NOT have blur after scrolling frame 1");
+        assert_eq!(f0_content.fg_dest.width, slot_w, "Frame 0 fg_dest must fill slot width");
+        assert_eq!(f0_content.fg_dest.height, slot_h, "Frame 0 fg_dest must fill slot height");
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
 }
