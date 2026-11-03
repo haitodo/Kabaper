@@ -622,6 +622,18 @@ fn draw_operation_bar(state: &AppState, hdc: HDC, width: i32, dpi: u32) {
                         radius,
                     );
                 }
+                BarButtonId::RandomAll => {
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        "全ランダム",
+                        ModernButtonStyle::SecondaryTonal,
+                        radius,
+                    );
+                }
                 BarButtonId::UpdateWallpaper => {
                     draw_modern_button(
                         hdc,
@@ -1579,7 +1591,8 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
 
         let lines = [
             ("ホイール / → / ← / ↑ / ↓", "画像送り"),
-            ("Shift+R / Ctrl+R", "画像のランダム入替"),
+            ("Shift+R / Ctrl+R", "画像のランダム入替 (選択枠)"),
+            ("Ctrl+Shift+R", "全枠の画像をランダム入替"),
             ("Home / End", "先頭 / 末尾"),
             ("V / 中クリック", "通常 / 合成 切替"),
             ("Z / 0", "通常表示: 等倍切替 / リセット"),

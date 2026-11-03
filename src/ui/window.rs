@@ -1014,7 +1014,9 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     VK_R => {
-                        if shift || ctrl {
+                        if ctrl && shift {
+                            state.random_all_images();
+                        } else if shift || ctrl {
                             state.random_image();
                         } else {
                             state.trigger_random_update();
@@ -1379,6 +1381,7 @@ fn handle_bar_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
                 BarButtonId::Scale => state.adjust_max_scale(0.05),
                 BarButtonId::Apply => state.apply_current_wallpaper(),
                 BarButtonId::Random => state.random_image(),
+                BarButtonId::RandomAll => state.random_all_images(),
                 BarButtonId::UpdateWallpaper => state.trigger_random_update(),
                 BarButtonId::Undo => state.undo_wallpaper(),
                 BarButtonId::SavePng => state.export_png_dialog(),
@@ -1976,6 +1979,12 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
 
         let _ = AppendMenuW(menu, MF_STRING, 1002, w!("再読込 (F5)"));
         let _ = AppendMenuW(menu, MF_STRING, 1006, w!("画像をランダム入替 (Shift+R)"));
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            1012,
+            w!("全枠の画像をランダム入替 (Ctrl+Shift+R)"),
+        );
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
         let _ = AppendMenuW(menu, MF_STRING, 1007, w!("スマートパン (被写体/顔自動合わせ: A)"));
         let _ = AppendMenuW(menu, MF_STRING, 1008, w!("フィルムストリップ表示切替 (T)"));
@@ -2006,6 +2015,7 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
                 state.rebuild_layout(true, true);
             }
             1006 => state.random_image(),
+            1012 => state.random_all_images(),
             1007 => state.apply_smart_pan_current_frame(),
             1008 => {
                 state.show_filmstrip = !state.show_filmstrip;

@@ -167,6 +167,7 @@ pub fn get_operation_bar_buttons(dpi: u32) -> Vec<(BarButtonId, RECT)> {
         (BarButtonId::Scale, 82),
         (BarButtonId::Apply, 68),
         (BarButtonId::Random, 78),
+        (BarButtonId::RandomAll, 82),
         (BarButtonId::UpdateWallpaper, 82),
         (BarButtonId::Undo, 80),
         (BarButtonId::SavePng, 82),

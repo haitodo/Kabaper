@@ -1057,6 +1057,111 @@ impl AppState {
         self.ensure_current_item_visible_in_sidebar();
     }
 
+    pub fn random_all_images(&mut self) {
+        if self.view_mode == ViewMode::Normal {
+            self.random_image();
+            return;
+        }
+
+        if self.catalog.items.is_empty() {
+            self.set_osd("画像がありません".to_string(), 2, false);
+            return;
+        }
+
+        if self.layout_frames.is_empty() {
+            self.rebuild_layout(true, true);
+            if self.layout_frames.is_empty() {
+                self.set_osd("枠がありません".to_string(), 2, false);
+                return;
+            }
+        }
+
+        let total_frames = self.layout_frames.len();
+        let unpinned_indices: Vec<usize> = self
+            .layout_frames
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !f.pinned)
+            .map(|(i, _)| i)
+            .collect();
+
+        if unpinned_indices.is_empty() {
+            self.set_osd("全枠ピン留め中".to_string(), 2, false);
+            return;
+        }
+
+        let mut used_paths: HashSet<PathBuf> = self
+            .layout_frames
+            .iter()
+            .filter(|f| f.pinned)
+            .filter_map(|f| f.image.as_ref())
+            .map(|img| PathBuf::from(&img.id.0))
+            .collect();
+
+        let unpinned_info: Vec<(usize, Option<PathBuf>)> = unpinned_indices
+            .iter()
+            .map(|&idx| {
+                let p = self.layout_frames[idx]
+                    .image
+                    .as_ref()
+                    .map(|img| PathBuf::from(&img.id.0));
+                (idx, p)
+            })
+            .collect();
+
+        let mut changed_count = 0;
+        let mut updated_frame0_path: Option<PathBuf> = None;
+        let mut load_error = false;
+
+        for (idx, current_path) in unpinned_info {
+            if let Some((_, next_path)) = self
+                .catalog
+                .choose_random_candidate(current_path.as_deref(), &used_paths)
+            {
+                match self.get_or_read_image_spec(&next_path) {
+                    Ok(spec) => {
+                        used_paths.insert(next_path.clone());
+                        if current_path.as_ref() != Some(&next_path) {
+                            changed_count += 1;
+                        }
+                        self.layout_frames[idx].image = Some(spec);
+                        self.layout_frames[idx].pan = (0.5, 0.5);
+                        if idx == 0 {
+                            updated_frame0_path = Some(next_path);
+                        }
+                    }
+                    Err(_) => {
+                        load_error = true;
+                    }
+                }
+            }
+        }
+
+        if let Some(p0) = updated_frame0_path {
+            self.catalog.select_by_path(&p0);
+        }
+
+        if changed_count > 0 {
+            self.rebuild_layout(false, false);
+            let pinned_count = total_frames - unpinned_indices.len();
+            if pinned_count > 0 {
+                self.set_osd(
+                    format!("全枠ランダム変更 ({}枠固定)", pinned_count),
+                    2,
+                    false,
+                );
+            } else {
+                self.set_osd("全枠の画像をランダム変更".to_string(), 2, false);
+            }
+        } else if load_error {
+            self.set_osd("画像の読み込みに失敗しました".to_string(), 2, true);
+        } else {
+            self.set_osd("変更可能な候補画像がありません".to_string(), 2, false);
+        }
+
+        self.ensure_current_item_visible_in_sidebar();
+    }
+
     pub fn switch_view_mode(&mut self) {
         self.reset_normal_zoom();
         if self.view_mode == ViewMode::Normal {

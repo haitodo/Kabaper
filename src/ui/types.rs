@@ -68,6 +68,7 @@ pub enum BarButtonId {
     Scale,
     Apply,
     Random,
+    RandomAll,
     UpdateWallpaper,
     Undo,
     SavePng,

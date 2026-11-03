@@ -971,6 +971,73 @@ fn test_acceptance_random_image_composite_view() {
 
 
 #[test]
+fn test_acceptance_random_all_images() {
+    let temp = std::env::temp_dir().join(format!("kabaper_test_rnd_all_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).unwrap();
+
+    let p1 = temp.join("img1.bmp");
+    let p2 = temp.join("img2.bmp");
+    let p3 = temp.join("img3.bmp");
+    let p4 = temp.join("img4.bmp");
+    create_valid_test_bmp(&p1);
+    create_valid_test_bmp(&p2);
+    create_valid_test_bmp(&p3);
+    create_valid_test_bmp(&p4);
+
+    let storage_dir = temp.join("storage");
+    let storage = Storage::init_with_dir(storage_dir).unwrap();
+    let mut state = kabaper::ui::AppState::new(storage, AppConfig::default(), Some(&temp)).unwrap();
+
+    // 1. Composite view with 2 frames
+    state.view_mode = kabaper::ui::ViewMode::Composite;
+    state.config.layout.mode = "split2".to_string();
+    state.rebuild_layout(true, true);
+
+    assert_eq!(state.layout_frames.len(), 2);
+
+    // Call random_all_images: both frames should be randomized without duplicating each other
+    state.random_all_images();
+    let new_f0 = state.layout_frames[0].image.as_ref().unwrap().id.0.clone();
+    let new_f1 = state.layout_frames[1].image.as_ref().unwrap().id.0.clone();
+
+    assert_ne!(new_f0, new_f1, "Frames 0 and 1 must not have identical images");
+    assert_eq!(state.layout_frames[0].pan, (0.5, 0.5));
+    assert_eq!(state.layout_frames[1].pan, (0.5, 0.5));
+
+    // 2. Pin frame 0 and call random_all_images
+    state.layout_frames[0].pinned = true;
+    let pinned_f0 = state.layout_frames[0].image.as_ref().unwrap().id.0.clone();
+    state.random_all_images();
+    assert_eq!(
+        state.layout_frames[0].image.as_ref().unwrap().id.0,
+        pinned_f0,
+        "Pinned frame 0 must remain unchanged"
+    );
+    let after_f1 = state.layout_frames[1].image.as_ref().unwrap().id.0.clone();
+    assert_ne!(
+        after_f1, pinned_f0,
+        "Unpinned frame 1 must not duplicate pinned frame 0"
+    );
+
+    // 3. Pin both frames: nothing should change
+    state.layout_frames[1].pinned = true;
+    let pinned_f1 = state.layout_frames[1].image.as_ref().unwrap().id.0.clone();
+    state.random_all_images();
+    assert_eq!(state.layout_frames[0].image.as_ref().unwrap().id.0, pinned_f0);
+    assert_eq!(state.layout_frames[1].image.as_ref().unwrap().id.0, pinned_f1);
+
+    // 4. Normal mode: random_all_images works as random image selection
+    state.view_mode = kabaper::ui::ViewMode::Normal;
+    let normal_orig_idx = state.catalog.current_index.unwrap();
+    state.random_all_images();
+    let normal_new_idx = state.catalog.current_index.unwrap();
+    assert_ne!(normal_orig_idx, normal_new_idx, "Normal mode should pick a different image");
+
+    let _ = fs::remove_dir_all(&temp);
+}
+
+#[test]
 fn test_acceptance_dpi_scaling_operation_bar() {
     let dpi_100 = 96;
     let dpi_150 = 144;
