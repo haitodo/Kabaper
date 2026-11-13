@@ -136,6 +136,10 @@ impl Default for ScheduleConfig {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowConfig {
@@ -146,6 +150,8 @@ pub struct WindowConfig {
     pub maximized: bool,
     pub fullscreen: bool,
     pub show_info: bool,
+    #[serde(default = "default_true")]
+    pub always_on_top: bool,
 }
 
 impl Default for WindowConfig {
@@ -158,6 +164,7 @@ impl Default for WindowConfig {
             maximized: false,
             fullscreen: false,
             show_info: false,
+            always_on_top: true,
         }
     }
 }
@@ -758,5 +765,36 @@ mode = "split2"
         assert_eq!(p.frames[0].pan, (0.3, 0.7));
 
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_window_config_always_on_top_default_and_deserialize() {
+        let default_win = WindowConfig::default();
+        assert!(default_win.always_on_top);
+
+        let default_app = AppConfig::default();
+        assert!(default_app.window.always_on_top);
+
+        let toml_str = r#"
+            schema_version = 1
+            [window]
+            x = 200
+            y = 200
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(cfg.window.always_on_top);
+
+        let toml_str_false = r#"
+            schema_version = 1
+            [window]
+            always_on_top = false
+        "#;
+        let cfg_false: AppConfig = toml::from_str(toml_str_false).unwrap();
+        assert!(!cfg_false.window.always_on_top);
+
+        let serialized = toml::to_string(&cfg_false).unwrap();
+        assert!(serialized.contains("always_on_top = false"));
+        let roundtrip: AppConfig = toml::from_str(&serialized).unwrap();
+        assert!(!roundtrip.window.always_on_top);
     }
 }

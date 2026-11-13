@@ -1446,3 +1446,49 @@ fn test_acceptance_sidebar_frame_assignment() {
 
     let _ = fs::remove_dir_all(&temp);
 }
+
+#[test]
+fn test_acceptance_always_on_top_header_toggle_and_persistence() {
+    let temp = std::env::temp_dir().join(format!("kabaper_test_aot_acceptance_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).unwrap();
+
+    let storage_dir = temp.join("storage");
+    let storage = kabaper::store::Storage::init_with_dir(storage_dir.clone()).unwrap();
+    let mut state = kabaper::ui::AppState::new(storage, kabaper::store::AppConfig::default(), None).unwrap();
+
+    // 1. Verify default is always_on_top = true
+    assert!(state.always_on_top, "Default state must have always_on_top = true");
+    assert!(state.config.window.always_on_top, "Default config must have always_on_top = true");
+
+    // 2. Verify header buttons contain AlwaysOnTop
+    let dpi = 96;
+    let buttons = kabaper::ui::get_operation_bar_buttons(dpi);
+    let aot_btn = buttons.iter().find(|(id, _)| *id == kabaper::ui::BarButtonId::AlwaysOnTop);
+    assert!(aot_btn.is_some(), "Operation bar header must have AlwaysOnTop button");
+
+    // 3. Toggle via method (simulating header button click)
+    state.toggle_always_on_top();
+    assert!(!state.always_on_top, "Toggled state must be false");
+    assert!(!state.config.window.always_on_top);
+    assert!(state.osd.is_some());
+    assert!(state.osd.as_ref().unwrap().0.contains("OFF"));
+
+    // Save config and simulate restart
+    assert!(state.storage.save_config(&state.config).is_ok());
+
+    let mut storage2 = kabaper::store::Storage::init_with_dir(storage_dir).unwrap();
+    let (reloaded_cfg, _) = storage2.load_config();
+    assert!(!reloaded_cfg.window.always_on_top, "Persisted false state must be loaded");
+
+    let mut state2 = kabaper::ui::AppState::new(storage2, reloaded_cfg, None).unwrap();
+    assert!(!state2.always_on_top);
+
+    // Toggle back to true
+    state2.toggle_always_on_top();
+    assert!(state2.always_on_top);
+    assert!(state2.config.window.always_on_top);
+    assert!(state2.osd.as_ref().unwrap().0.contains("ON"));
+
+    let _ = fs::remove_dir_all(&temp);
+}

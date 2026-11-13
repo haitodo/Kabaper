@@ -462,4 +462,38 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp);
     }
+
+    #[test]
+    fn test_operation_bar_always_on_top_button() {
+        let buttons = get_operation_bar_buttons(96);
+        let aot_btn = buttons.iter().find(|(id, _)| *id == BarButtonId::AlwaysOnTop);
+        assert!(aot_btn.is_some(), "Operation bar must contain AlwaysOnTop button");
+        let (_, r) = aot_btn.unwrap();
+        assert!(r.right > r.left, "Button width must be positive");
+        assert_eq!(r.bottom - r.top, 32);
+    }
+
+    #[test]
+    fn test_toggle_always_on_top() {
+        let temp = std::env::temp_dir().join(format!("kabaper_test_aot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let storage = crate::store::Storage::init_with_dir(temp.clone()).unwrap();
+        let mut state = AppState::new(storage, crate::store::AppConfig::default(), None).unwrap();
+
+        assert!(state.always_on_top);
+        assert!(state.config.window.always_on_top);
+
+        state.toggle_always_on_top();
+        assert!(!state.always_on_top);
+        assert!(!state.config.window.always_on_top);
+        assert!(state.config_dirty);
+
+        state.toggle_always_on_top();
+        assert!(state.always_on_top);
+        assert!(state.config.window.always_on_top);
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
 }

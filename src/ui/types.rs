@@ -74,6 +74,7 @@ pub enum BarButtonId {
     SavePng,
     Settings,
     Shortcuts,
+    AlwaysOnTop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

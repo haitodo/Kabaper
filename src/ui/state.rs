@@ -52,6 +52,7 @@ pub struct AppState {
     pub fullscreen: bool,
     pub normal_window_rect: RECT,
     pub show_info: bool,
+    pub always_on_top: bool,
     pub osd: Option<(String, Instant, Duration, bool)>, // (msg, start, duration, has_undo_button)
     pub error_banner: Vec<String>,
     pub bar_visible: bool,
@@ -183,6 +184,7 @@ impl AppState {
             fullscreen: false,
             normal_window_rect: RECT::default(),
             show_info: false,
+            always_on_top: false,
             osd: None,
             error_banner,
             bar_visible: true,
@@ -220,6 +222,7 @@ impl AppState {
         };
 
         state.show_info = state.config.window.show_info;
+        state.always_on_top = state.config.window.always_on_top;
 
         // Open library folder per Section 2.1
         if let Some(p) = start_path {
@@ -1825,6 +1828,17 @@ impl AppState {
                     );
                     let _ = ShowWindow(self.hwnd, SW_SHOWNORMAL);
                 }
+                if self.always_on_top {
+                    let _ = SetWindowPos(
+                        self.hwnd,
+                        Some(HWND_TOPMOST),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                }
                 self.fullscreen = false;
                 self.bar_visible = true;
             } else {
@@ -1891,6 +1905,41 @@ impl AppState {
             self.fullscreen = true;
             self.bar_visible = false;
         }
+    }
+
+    pub fn toggle_always_on_top(&mut self) {
+        self.always_on_top = !self.always_on_top;
+        self.config.window.always_on_top = self.always_on_top;
+        self.mark_config_dirty();
+
+        if !self.hwnd.0.is_null() {
+            unsafe {
+                let insert_after = if self.always_on_top {
+                    HWND_TOPMOST
+                } else {
+                    HWND_NOTOPMOST
+                };
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    Some(insert_after),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+                let _ = InvalidateRect(Some(self.hwnd), None, false);
+            }
+        }
+
+        self.set_osd(
+            format!(
+                "最前面表示: {}",
+                if self.always_on_top { "ON" } else { "OFF" }
+            ),
+            2,
+            false,
+        );
     }
 
     pub fn toggle_sidebar(&mut self) {

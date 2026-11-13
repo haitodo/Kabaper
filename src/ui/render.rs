@@ -694,6 +694,23 @@ fn draw_operation_bar(state: &AppState, hdc: HDC, width: i32, dpi: u32) {
                         radius,
                     );
                 }
+                BarButtonId::AlwaysOnTop => {
+                    let style = if state.always_on_top {
+                        ModernButtonStyle::SegmentActive
+                    } else {
+                        ModernButtonStyle::SecondaryTonal
+                    };
+                    draw_modern_button(
+                        hdc,
+                        r.left,
+                        r.top,
+                        w,
+                        h,
+                        "最前面",
+                        style,
+                        radius,
+                    );
+                }
             }
         }
 

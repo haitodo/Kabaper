@@ -119,8 +119,13 @@ pub fn run_gui(mut state: AppState, class_name: &str) -> Result<()> {
             };
         }
 
+        let mut ex_style = WINDOW_EX_STYLE::default();
+        if state.always_on_top {
+            ex_style |= WS_EX_TOPMOST;
+        }
+
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
+            ex_style,
             PCWSTR(wide_class.as_ptr()),
             w!("Kabaper"),
             WS_OVERLAPPEDWINDOW,
@@ -188,6 +193,17 @@ pub fn run_gui(mut state: AppState, class_name: &str) -> Result<()> {
         } else {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
+        if state.always_on_top {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
         let _ = UpdateWindow(hwnd);
 
         // Message loop
@@ -213,6 +229,7 @@ pub fn run_gui(mut state: AppState, class_name: &str) -> Result<()> {
         }
         state.config.window.fullscreen = state.fullscreen;
         state.config.window.show_info = state.show_info;
+        state.config.window.always_on_top = state.always_on_top;
         if let Some(item) = state.catalog.current_item() {
             state.config.library.last_image = Some(item.path.to_string_lossy().to_string());
         }
@@ -1390,6 +1407,9 @@ fn handle_bar_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
                 }
                 BarButtonId::Shortcuts => {
                     state.modal_dialog = ModalDialog::Shortcuts;
+                }
+                BarButtonId::AlwaysOnTop => {
+                    state.toggle_always_on_top();
                 }
             }
             break;

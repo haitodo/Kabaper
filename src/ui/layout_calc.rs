@@ -173,6 +173,7 @@ pub fn get_operation_bar_buttons(dpi: u32) -> Vec<(BarButtonId, RECT)> {
         (BarButtonId::SavePng, 82),
         (BarButtonId::Settings, 64),
         (BarButtonId::Shortcuts, 82),
+        (BarButtonId::AlwaysOnTop, 76),
     ];
 
     let mut current_x = pad_x;
