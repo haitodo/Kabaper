@@ -8,7 +8,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
 
 use kabaper::random::execute_random_update;
-use kabaper::store::{AppConfig, Storage, get_instance_id_for_dir};
+use kabaper::store::{Storage, get_instance_id_for_dir};
 use kabaper::ui::{AppState, run_gui};
 
 fn main() {
@@ -170,7 +170,7 @@ fn run_gui_mode(start_path: Option<&Path>) {
         }
     }
 
-    let state = match AppState::new(storage, AppConfig::default(), start_path) {
+    let state = match AppState::for_window(storage, start_path) {
         Ok(s) => s,
         Err(e) => {
             unsafe {

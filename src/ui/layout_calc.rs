@@ -161,13 +161,13 @@ pub fn get_operation_bar_buttons(dpi: u32) -> Vec<(BarButtonId, RECT)> {
     let defs = [
         (BarButtonId::Open, 76),
         (BarButtonId::Sidebar, 76),
+        (BarButtonId::Random, 78),
+        (BarButtonId::RandomAll, 82),
         (BarButtonId::ViewMode, 68),
+        (BarButtonId::Apply, 68),
         (BarButtonId::Monitor, 78),
         (BarButtonId::Split, 88),
         (BarButtonId::Scale, 82),
-        (BarButtonId::Apply, 68),
-        (BarButtonId::Random, 78),
-        (BarButtonId::RandomAll, 82),
         (BarButtonId::UpdateWallpaper, 82),
         (BarButtonId::Undo, 80),
         (BarButtonId::SavePng, 82),
@@ -589,9 +589,12 @@ pub fn compute_sidebar_layout(
             if group_items_bottom < list_rect.top || group_items_top > list_rect.bottom {
                 y_accum += group_items_h;
             } else {
-                for &idx in &group.item_indices {
+                let first = ((list_rect.top - group_items_top - 1).max(0) / item_h) as usize;
+                let end = ((list_rect.bottom - group_items_top) / item_h + 1) as usize;
+                for offset in first..end.min(item_count) {
+                    let idx = group.item_indices[offset];
                     let item = &catalog.items[idx];
-                    let item_top = list_rect.top + y_accum - scroll_offset;
+                    let item_top = group_items_top + offset as i32 * item_h;
                     let item_bottom = item_top + item_h;
                     if item_bottom >= list_rect.top && item_top <= list_rect.bottom {
                         let is_selected = selected_index == Some(idx);
@@ -658,8 +661,8 @@ pub fn compute_sidebar_layout(
                             },
                         });
                     }
-                    y_accum += item_h;
                 }
+                y_accum += group_items_h;
             }
         }
     }
@@ -676,7 +679,7 @@ pub fn compute_sidebar_layout(
         };
         let bar_usable_h = (s_rect.bottom - s_rect.top).max(1);
         let thumb_h = ((bar_usable_h as i64 * list_h as i64) / total_content_height as i64) as i32;
-        let thumb_h = thumb_h.clamp(scale_by_dpi(24, dpi), bar_usable_h);
+        let thumb_h = thumb_h.max(scale_by_dpi(24, dpi)).min(bar_usable_h);
         let max_scroll = (total_content_height - list_h).max(1);
         let thumb_top = s_rect.top
             + ((scroll_offset as i64 * (bar_usable_h - thumb_h) as i64) / max_scroll as i64) as i32;

@@ -58,7 +58,7 @@ pub enum ScaleLimit {
     CropLimit,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlacedImage {
     pub id: ImageId,
     pub fg_src: RectF,         // 元画像座標系での前景切り抜き矩形

@@ -16,10 +16,9 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
 
 use crate::apply::WallpaperManager;
-use crate::catalog::{Catalog, is_supported_image, normalize_path};
+use crate::catalog::{Catalog, normalize_path};
 use crate::compose::{
-    ComposedBitmap, compose_base_layer, compose_foreground_layer,
-    compose_single_frame_foreground, plan_has_background_blur, save_png_wic,
+    ComposedBitmap, compose_single_frame_foreground, save_png_wic, update_preview,
 };
 use crate::decode::{DecodedImage, ImageDecoder};
 use crate::layout::{
@@ -30,12 +29,14 @@ use crate::random::execute_random_update;
 use crate::schedule::SchedulerManager;
 use crate::smart_pan::calculate_smart_pan;
 use crate::store::{AppConfig, FramePreset, Storage, WallpaperPreset};
+use super::library::{LibraryLoader, LibraryRequest, LoadedLibrary};
 use crate::ui::render::show_monitor_overlays;
 use crate::ui::types::{ModalDialog, SEQ_COUNTER, ViewMode};
 pub struct AppState {
     pub storage: Storage,
     pub config: AppConfig,
     pub catalog: Catalog,
+    library_loader: LibraryLoader,
     pub decoder: ImageDecoder,
     pub monitors: Vec<MonitorInfo>,
     pub target_monitor_idx: usize,
@@ -47,6 +48,7 @@ pub struct AppState {
     pub active_plan: Option<LayoutPlan>,
     pub active_base_layer: Option<ComposedBitmap>,
     pub active_composed: Option<ComposedBitmap>,
+    preview_dim_ratio: f64,
     pub wallpaper_mgr: Option<WallpaperManager>,
     pub scheduler_mgr: Option<SchedulerManager>,
     pub fullscreen: bool,
@@ -86,6 +88,8 @@ pub struct AppState {
     pub prefetch_tx: mpsc::Sender<PrefetchResult>,
     pub prefetch_rx: mpsc::Receiver<PrefetchResult>,
     pub prefetch_gen: u64,
+    prefetch_active: bool,
+    prefetch_paths: Vec<PathBuf>,
     pub latest_prefetch_req: Arc<AtomicU64>,
 }
 
@@ -103,10 +107,36 @@ pub struct PrefetchResult {
 
 impl AppState {
     pub fn new(
-        mut storage: Storage,
+        storage: Storage,
         _initial_config: AppConfig,
         start_path: Option<&Path>,
     ) -> Result<Self> {
+        let mut state = Self::initialize(storage)?;
+        if let Some(request) = state.initial_library(start_path) {
+            let result = request.load(state.catalog.excluded_paths.clone(), &|| true);
+            state.finish_library_load(result);
+        }
+        Ok(state)
+    }
+
+    pub fn for_window(storage: Storage, start_path: Option<&Path>) -> Result<Self> {
+        let mut state = Self::initialize(storage)?;
+        if let Some(request) = state.initial_library(start_path) {
+            state.request_library(request);
+        }
+        Ok(state)
+    }
+
+    fn initial_library(&self, path: Option<&Path>) -> Option<LibraryRequest> {
+        path.map(|p| LibraryRequest::Open(p.to_owned())).or_else(|| {
+            Some(LibraryRequest::Restore(
+                PathBuf::from(self.config.library.folder.as_ref()?),
+                self.config.library.last_image.as_ref().map(PathBuf::from),
+            ))
+        })
+    }
+
+    fn initialize(mut storage: Storage) -> Result<Self> {
         let (config, cfg_err) = storage.load_config();
 
         let mut error_banner = Vec::new();
@@ -143,22 +173,24 @@ impl AppState {
         }
         let target_idx = target_idx.unwrap_or(0);
 
-        let wallpaper_mgr = WallpaperManager::new().ok();
-        let is_portable = storage.root_dir.ends_with("data");
-        let scheduler_mgr = {
-            let mgr = SchedulerManager::new(&storage.root_dir, is_portable).ok();
-            if let Some(sched) = &mgr {
-                if config.schedule.enabled {
-                    if let Ok(exe) = std::env::current_exe() {
-                        if let Err(e) = sched.sync_schedule(&config.schedule, &exe) {
-                            error_banner.push(format!("タスクスケジューラ同期エラー: {}", e));
-                        }
+        let wallpaper_mgr = None;
+        let scheduler_mgr = if config.schedule.enabled {
+            match SchedulerManager::new(&storage.root_dir, storage.root_dir.ends_with("data")) {
+                Ok(sched) => {
+                    if let Ok(exe) = std::env::current_exe()
+                        && let Err(e) = sched.sync_schedule(&config.schedule, &exe)
+                    {
+                        error_banner.push(format!("タスクスケジューラ同期エラー: {}", e));
                     }
+                    Some(sched)
                 }
-            } else if config.schedule.enabled {
-                error_banner.push("タスクスケジューラサービスに接続できません".into());
+                Err(_) => {
+                    error_banner.push("タスクスケジューラサービスに接続できません".into());
+                    None
+                }
             }
-            mgr
+        } else {
+            None
         };
 
         let (prefetch_tx, prefetch_rx) = mpsc::channel();
@@ -168,6 +200,7 @@ impl AppState {
             storage,
             config,
             catalog,
+            library_loader: LibraryLoader::default(),
             decoder,
             monitors,
             target_monitor_idx: target_idx,
@@ -179,6 +212,7 @@ impl AppState {
             active_plan: None,
             active_base_layer: None,
             active_composed: None,
+            preview_dim_ratio: 0.0,
             wallpaper_mgr,
             scheduler_mgr,
             fullscreen: false,
@@ -218,27 +252,13 @@ impl AppState {
             prefetch_tx,
             prefetch_rx,
             prefetch_gen: 0,
+            prefetch_active: false,
+            prefetch_paths: Vec::new(),
             latest_prefetch_req,
         };
 
         state.show_info = state.config.window.show_info;
         state.always_on_top = state.config.window.always_on_top;
-
-        // Open library folder per Section 2.1
-        if let Some(p) = start_path {
-            state.open_path(p);
-        } else if let Some(folder_str) = state.config.library.folder.clone() {
-            let folder = PathBuf::from(&folder_str);
-            if folder.is_dir() {
-                let last_img = state.config.library.last_image.as_deref().map(Path::new);
-                state.catalog.open_folder(&folder, last_img);
-                state.rebuild_layout(true, true);
-            } else {
-                state.rebuild_layout(true, true);
-            }
-        } else {
-            state.rebuild_layout(true, true);
-        }
 
         if let Some(err) = state.error_banner.first() {
             state.set_osd(err.clone(), 5, false);
@@ -260,7 +280,9 @@ impl AppState {
             self.spec_cache.insert(path.to_path_buf(), spec.clone());
             return Ok(spec);
         }
-        let spec = self.decoder.read_image_spec(path)?;
+        let spec = self.decoder.read_image_spec(path).inspect_err(|e| {
+            self.catalog.mark_failed(path, e.to_string());
+        })?;
         self.spec_cache.insert(path.to_path_buf(), spec.clone());
         Ok(spec)
     }
@@ -285,7 +307,7 @@ impl AppState {
         if self.hwnd.0.is_null() {
             return;
         }
-        let needs_timer = self.osd.is_some()
+        let needs_timer = self.library_loading() || self.prefetch_active || self.osd.is_some()
             || (self.fullscreen && self.bar_visible)
             || self.config_dirty;
 
@@ -318,51 +340,79 @@ impl AppState {
     }
 
     pub fn open_path(&mut self, p: &Path) {
-        if p.is_file() {
-            if is_supported_image(p) {
-                if let Some(parent) = p.parent()
-                    && self.catalog.open_folder(parent, Some(p))
-                {
-                    self.spec_cache.clear();
-                    self.add_recent_folder(parent);
-                    self.config.library.folder = Some(parent.to_string_lossy().to_string());
-                    self.config.library.last_image = Some(p.to_string_lossy().to_string());
-                    self.mark_config_dirty();
-                    self.rebuild_layout(true, true);
-                    self.set_osd(format!("ファイルを開きました: {}", p.display()), 3, false);
-                }
-            } else {
-                self.set_osd(
-                    format!("非対応のファイル形式です: {}", p.display()),
-                    3,
-                    false,
-                );
-            }
-        } else if p.is_dir() {
-            if self.catalog.open_folder(p, None) {
-                self.spec_cache.clear();
-                self.add_recent_folder(p);
-                self.config.library.folder = Some(p.to_string_lossy().to_string());
-                self.config.library.last_image = self
-                    .catalog
-                    .current_item()
-                    .map(|it| it.path.to_string_lossy().to_string());
-                self.mark_config_dirty();
-                self.rebuild_layout(true, true);
-                self.set_osd(format!("フォルダを開きました: {}", p.display()), 3, false);
-            } else {
-                self.set_osd(
-                    format!("フォルダを開けませんでした: {}", p.display()),
-                    3,
-                    false,
-                );
-            }
+        let request = LibraryRequest::Open(p.to_owned());
+        if self.hwnd.0.is_null() {
+            let result = request.load(self.catalog.excluded_paths.clone(), &|| true);
+            self.finish_library_load(result);
         } else {
-            self.set_osd(
-                format!("指定されたパスが存在しません: {}", p.display()),
-                3,
-                false,
-            );
+            self.request_library(request);
+        }
+    }
+
+    pub fn reload_library(&mut self) {
+        if self.library_loading() {
+            return;
+        }
+        if let Some(folder) = &self.catalog.folder {
+            self.request_library(LibraryRequest::Reload(
+                folder.clone(), self.catalog.current_item().map(|item| item.path.clone()),
+            ));
+        }
+    }
+
+    fn request_library(&mut self, request: LibraryRequest) {
+        self.library_loader.request(request, self.catalog.excluded_paths.clone());
+        self.update_timer();
+    }
+
+    pub fn library_loading(&self) -> bool {
+        self.library_loader.busy()
+    }
+
+    pub fn poll_library(&mut self) {
+        if let Some(result) = self.library_loader.poll() {
+            self.finish_library_load(result);
+            unsafe { let _ = InvalidateRect(Some(self.hwnd), None, false); }
+        }
+    }
+
+    fn finish_library_load(&mut self, result: std::result::Result<LoadedLibrary, String>) {
+        let mut loaded = match result {
+            Ok(library) => library,
+            Err(message) => {
+                self.set_osd(message, 3, false);
+                return;
+            }
+        };
+        // Exclusions can change while a new library is being indexed.
+        if self.catalog.excluded_paths != loaded.catalog.excluded_paths {
+            loaded.catalog.excluded_paths.clone_from(&self.catalog.excluded_paths);
+            for item in &mut loaded.catalog.items {
+                item.is_excluded = loaded.catalog.excluded_paths.contains(&item.path);
+            }
+        }
+        self.release_prefetch_cache();
+        self.cached_images.clear();
+        self.spec_cache.clear();
+        self.active_base_layer = None;
+        self.active_composed = None;
+        self.active_plan = None;
+        self.catalog = loaded.catalog;
+        self.collapsed_folders.clear();
+        self.sidebar_scroll_offset = 0;
+        self.sidebar_scroll_offset_f = 0.0;
+        self.sidebar_target_scroll_offset = 0.0;
+        self.reset_normal_zoom();
+        if loaded.add_to_recent && let Some(folder) = self.catalog.folder.clone() {
+            self.add_recent_folder(&folder);
+            self.config.library.folder = Some(folder.to_string_lossy().into_owned());
+            self.config.library.last_image = self.catalog.current_item().map(|it| it.path.to_string_lossy().into_owned());
+            self.mark_config_dirty();
+        }
+        self.rebuild_layout(true, true);
+        self.ensure_current_item_visible_in_sidebar();
+        if let Some(message) = loaded.message {
+            self.set_osd(message, 3, false);
         }
     }
 
@@ -418,7 +468,17 @@ impl AppState {
 
         // Fill candidate specs from catalog
         if let Some(cur_idx) = self.catalog.current_index {
+            let target_count = match layout_mode {
+                LayoutMode::Auto => 3,
+                LayoutMode::Fixed(n) => n as usize,
+            };
+            let missing = target_count.saturating_sub(self.layout_frames.len())
+                + self.layout_frames.iter().filter(|f| f.image.is_none()).count();
+            // Bound synchronous header reads even when a folder contains corrupt images.
             for step in 1..self.catalog.items.len().min(10) {
+                if candidate_specs.len() >= missing {
+                    break;
+                }
                 let idx = (cur_idx + step) % self.catalog.items.len();
                 let item = &self.catalog.items[idx];
                 if item.is_excluded || item.failure_reason.is_some() || used_paths.contains(&item.path) {
@@ -483,7 +543,7 @@ impl AppState {
             self.selected_frame_idx = self.layout_frames.len().saturating_sub(1);
         }
 
-        self.active_plan = Some(plan);
+        let previous = self.active_plan.replace(plan);
 
         // Lazy composition: only decode all frames and compose 4K bitmap in composite mode
         if self.view_mode == ViewMode::Composite {
@@ -492,32 +552,25 @@ impl AppState {
             for frame in &plan_ref.frames {
                 if let Some(placed) = &frame.content {
                     let p = PathBuf::from(&placed.id.0);
-                    if !self.cached_images.contains_key(&placed.id)
-                        && let Ok(decoded) = self.decoder.decode_image(&p, Some(4096))
-                    {
-                        self.cached_images.insert(placed.id.clone(), decoded);
+                    if !self.cached_images.contains_key(&placed.id) && !self.catalog.failed_decodes.contains_key(&p) {
+                        match self.decoder.decode_image(&p, Some(4096)) {
+                            Ok(decoded) => { self.cached_images.insert(placed.id.clone(), decoded); }
+                            Err(e) => self.catalog.mark_failed(&p, e.to_string()),
+                        }
                     }
                 }
             }
 
-            // Re-compose layout bitmap using base layer cache for instant pan updates
-            let has_blur = plan_has_background_blur(plan_ref);
-            let (base_layer, mut composed) = if has_blur {
-                let base = compose_base_layer(plan_ref, &self.cached_images, self.config.layout.dim_ratio);
-                let comp = base.clone();
-                (Some(base), comp)
-            } else {
-                let comp = ComposedBitmap::new(mw, mh);
-                (None, comp)
-            };
-            compose_foreground_layer(&mut composed, plan_ref, &self.cached_images);
-
-            self.active_base_layer = base_layer;
-            self.active_composed = Some(composed);
+            let dim = self.config.layout.dim_ratio;
+            let reusable = previous.as_ref().filter(|_| dim == self.preview_dim_ratio);
+            update_preview(reusable, plan_ref, &self.cached_images, dim,
+                &mut self.active_base_layer, &mut self.active_composed);
+            self.preview_dim_ratio = dim;
         } else {
             self.active_base_layer = None;
             self.active_composed = None;
             self.ensure_current_image_loaded();
+            return;
         }
 
         self.prefetch_adjacent_images();
@@ -573,10 +626,14 @@ impl AppState {
     pub fn ensure_current_image_loaded(&mut self) {
         if let Some(item) = self.catalog.current_item() {
             let img_id = ImageId(item.path.to_string_lossy().to_string());
-            if !self.cached_images.contains_key(&img_id)
-                && let Ok(dec) = self.decoder.decode_image(&item.path, Some(4096))
-            {
-                self.cached_images.insert(img_id, dec);
+            if !self.cached_images.contains_key(&img_id) && item.failure_reason.is_none() {
+                match self.decoder.decode_image(&item.path, Some(4096)) {
+                    Ok(decoded) => { self.cached_images.insert(img_id, decoded); }
+                    Err(e) => {
+                        let path = item.path.clone();
+                        self.catalog.mark_failed(&path, e.to_string());
+                    }
+                }
             }
             self.prefetch_adjacent_images();
             self.prune_image_cache();
@@ -594,7 +651,7 @@ impl AppState {
         let cur = self.catalog.current_index.unwrap_or(0);
         let indices = [(cur + n - 1) % n, (cur + 1) % n];
 
-        let to_fetch: Vec<PathBuf> = indices
+        let mut to_fetch: Vec<PathBuf> = indices
             .iter()
             .filter_map(|&idx| {
                 let item = &self.catalog.items[idx];
@@ -608,57 +665,56 @@ impl AppState {
             })
             .collect();
 
-        if to_fetch.is_empty() {
+        to_fetch.dedup();
+        if self.prefetch_paths == to_fetch {
             return;
         }
-
+        self.prefetch_paths = to_fetch;
         self.prefetch_gen += 1;
-        let req_gen = self.prefetch_gen;
-        self.latest_prefetch_req.store(req_gen, Ordering::SeqCst);
-
-        let tx = self.prefetch_tx.clone();
-        let latest_req = Arc::clone(&self.latest_prefetch_req);
-
-        rayon::spawn(move || {
-            if latest_req.load(Ordering::Relaxed) != req_gen {
-                return;
-            }
-            let mut results = Vec::new();
-            for path in to_fetch {
-                if latest_req.load(Ordering::Relaxed) != req_gen {
-                    return;
-                }
-                if let Ok(decoder) = ImageDecoder::new()
-                    && let Ok(dec) = decoder.decode_image(&path, Some(4096))
-                {
-                    results.push(PrefetchItem {
-                        id: ImageId(path.to_string_lossy().to_string()),
-                        image: dec,
-                    });
-                }
-            }
-            if !results.is_empty() && latest_req.load(Ordering::Relaxed) == req_gen {
-                let _ = tx.send(PrefetchResult {
-                    generation: req_gen,
-                    items: results,
-                });
-            }
-        });
+        self.latest_prefetch_req.store(self.prefetch_gen, Ordering::Relaxed);
+        if !self.prefetch_active {
+            self.start_prefetch();
+        }
     }
 
-    /// Poll completed prefetch decodes and insert into cache without blocking
-    pub fn poll_prefetch_results(&mut self) {
-        let mut updated = false;
-        while let Ok(res) = self.prefetch_rx.try_recv() {
-            if res.generation == self.prefetch_gen {
-                for item in res.items {
-                    self.cached_images.insert(item.id, item.image);
-                    updated = true;
+    fn start_prefetch(&mut self) {
+        if self.prefetch_paths.is_empty() {
+            return;
+        }
+        self.prefetch_active = true;
+        let generation = self.prefetch_gen;
+        let paths = self.prefetch_paths.clone();
+        let tx = self.prefetch_tx.clone();
+        let latest = Arc::clone(&self.latest_prefetch_req);
+        rayon::spawn(move || {
+            let mut items = Vec::new();
+            if latest.load(Ordering::Relaxed) == generation && let Ok(decoder) = ImageDecoder::new() {
+                for path in paths {
+                    if latest.load(Ordering::Relaxed) != generation {
+                        break;
+                    }
+                    if let Ok(image) = decoder.decode_image(&path, Some(4096)) {
+                        items.push(PrefetchItem { id: image.id.clone(), image });
+                    }
                 }
             }
-        }
-        if updated {
-            self.prune_image_cache();
+            let _ = tx.send(PrefetchResult { generation, items });
+        });
+        self.update_timer();
+    }
+
+    pub fn poll_prefetch_results(&mut self) {
+        if let Ok(result) = self.prefetch_rx.try_recv() {
+            self.prefetch_active = false;
+            if result.generation == self.prefetch_gen {
+                self.prefetch_paths.clear();
+                for item in result.items {
+                    self.cached_images.entry(item.id).or_insert(item.image);
+                }
+                self.prune_image_cache();
+            } else {
+                self.start_prefetch();
+            }
         }
     }
 
@@ -715,7 +771,8 @@ impl AppState {
         self.prefetch_gen += 1;
         self.latest_prefetch_req
             .store(self.prefetch_gen, Ordering::SeqCst);
-        while self.prefetch_rx.try_recv().is_ok() {}
+        self.prefetch_paths.clear();
+        self.poll_prefetch_results();
 
         let mut keep = HashSet::new();
 
@@ -1178,6 +1235,7 @@ impl AppState {
             {
                 self.catalog.select_by_path(Path::new(&img.id.0));
             }
+            self.ensure_current_image_loaded();
             self.set_osd("通常表示".into(), 2, false);
         }
     }
@@ -2161,16 +2219,11 @@ impl AppState {
             let is_collapsed = self.collapsed_folders.contains(&group.folder_path);
             y_accum += folder_h;
             if !is_collapsed {
-                for &idx in &group.item_indices {
-                    if idx == cur_idx {
-                        target_y = Some(y_accum);
-                        break;
-                    }
-                    y_accum += item_h;
-                }
-                if target_y.is_some() {
+                if let Ok(row) = group.item_indices.binary_search(&cur_idx) {
+                    target_y = Some(y_accum + row as i32 * item_h);
                     break;
                 }
+                y_accum += group.item_indices.len() as i32 * item_h;
             }
         }
 

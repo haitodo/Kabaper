@@ -1,5 +1,5 @@
 use rand::seq::SliceRandom;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::apply::WallpaperManager;
 use crate::catalog::{collect_images_recursive, normalize_path};
-use crate::compose::{compose_layout, save_png_wic};
+use crate::compose::{compose_layout_with_dim, save_png_wic};
 use crate::decode::ImageDecoder;
 use crate::layout::{FrameInput, ImageSpec, LayoutMode, LayoutRequest, plan_layout};
 
@@ -143,7 +143,7 @@ pub fn execute_random_update(
 
     // Spec 5.3: 全モニター分のPNG生成・保存がすべて成功してから適用する
     // 生成段階で1台でも失敗した場合は適用を開始せず既存壁紙を維持する
-    let mut candidate_pool = valid_candidates.clone();
+    let mut candidate_pool = VecDeque::from(valid_candidates);
 
     for monitor in &monitors {
         let (mw, mh) = (monitor.width, monitor.height);
@@ -155,19 +155,21 @@ pub fn execute_random_update(
         }
 
         // Try to allocate valid images for this monitor
-        let mut used_for_this_monitor: Vec<PathBuf> = Vec::new();
         let mut candidate_specs: Vec<ImageSpec> = Vec::new();
 
         // Peek or test decodes from candidate_pool
         let mut checked_idx = 0;
-        while candidate_specs.len() < 3 && checked_idx < candidate_pool.len() {
+        let needed = match layout_mode {
+            LayoutMode::Fixed(count) => count as usize,
+            LayoutMode::Auto => 3,
+        };
+        while candidate_specs.len() < needed && checked_idx < candidate_pool.len() {
             let path = &candidate_pool[checked_idx];
             checked_idx += 1;
 
             match decoder.read_image_spec(path) {
                 Ok(spec) => {
                     candidate_specs.push(spec);
-                    used_for_this_monitor.push(path.clone());
                 }
                 Err(e) => {
                     // Mark failed and continue (Spec 6.1)
@@ -221,7 +223,7 @@ pub fn execute_random_update(
         }
 
         // Compose layout
-        let composed = compose_layout(&plan, &images_map);
+        let composed = compose_layout_with_dim(&plan, &images_map, cfg.layout.dim_ratio);
 
         // Generate unique file path: <monitor_hash>_<utc_ms>_<seq>.png (Spec 5.3)
         let mut hasher = DefaultHasher::new();
@@ -251,9 +253,10 @@ pub fn execute_random_update(
             .collect();
 
         for used in &adopted_images {
-            if let Some(pos) = candidate_pool.iter().position(|p| p == used) {
-                let removed = candidate_pool.remove(pos);
-                candidate_pool.push(removed);
+            if let Some(pos) = candidate_pool.iter().position(|p| p == used)
+                && let Some(removed) = candidate_pool.remove(pos)
+            {
+                candidate_pool.push_back(removed);
             }
         }
     }

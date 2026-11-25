@@ -18,17 +18,19 @@ pub struct UndoSnapshot {
 pub struct WallpaperManager {
     wallpaper_api: IDesktopWallpaper,
     last_undo_snapshot: Option<UndoSnapshot>,
+    _apartment: crate::com::ComApartment,
 }
 
 impl WallpaperManager {
     pub fn new() -> Result<Self> {
         unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let apartment = crate::com::ComApartment::enter()?;
             let wallpaper_api: IDesktopWallpaper =
                 CoCreateInstance(&DesktopWallpaper, None, CLSCTX_ALL)?;
             Ok(Self {
                 wallpaper_api,
                 last_undo_snapshot: None,
+                _apartment: apartment,
             })
         }
     }

@@ -70,16 +70,17 @@ impl ExifOrientation {
 
 pub struct ImageDecoder {
     factory: IWICImagingFactory,
+    _apartment: crate::com::ComApartment,
 }
 
 impl ImageDecoder {
     pub fn new() -> Result<Self> {
         unsafe {
             // Ensure COM is initialized on the calling thread
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let apartment = crate::com::ComApartment::enter()?;
             let factory: IWICImagingFactory =
                 CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
-            Ok(Self { factory })
+            Ok(Self { factory, _apartment: apartment })
         }
     }
 

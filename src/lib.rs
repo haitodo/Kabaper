@@ -1,5 +1,6 @@
 pub mod apply;
 pub mod catalog;
+mod com;
 pub mod compose;
 pub mod decode;
 pub mod layout;

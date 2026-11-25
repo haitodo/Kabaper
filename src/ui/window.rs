@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::Com::*;
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -26,7 +25,6 @@ static mut APP_STATE_PTR: *mut AppState = std::ptr::null_mut();
 
 pub fn run_gui(mut state: AppState, class_name: &str) -> Result<()> {
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let instance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?;
 
@@ -205,6 +203,7 @@ pub fn run_gui(mut state: AppState, class_name: &str) -> Result<()> {
             );
         }
         let _ = UpdateWindow(hwnd);
+        state.poll_library();
 
         // Message loop
         let mut msg = MSG::default();
@@ -296,6 +295,7 @@ unsafe extern "system" fn wnd_proc(
                     return LRESULT(0);
                 }
 
+                state.poll_library();
                 state.poll_prefetch_results();
 
                 // Check OSD expiry
@@ -1093,10 +1093,7 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     VK_F5 => {
-                        state.catalog.reload();
-                        state.spec_cache.clear();
-                        state.rebuild_layout(true, true);
-                        state.set_osd("フォルダを再読込しました".into(), 2, false);
+                        state.reload_library();
                     }
                     VK_I => {
                         state.show_info = !state.show_info;
@@ -1418,6 +1415,10 @@ fn handle_bar_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32) {
 }
 
 fn sync_schedule_and_notify(state: &mut AppState) {
+    if state.scheduler_mgr.is_none() {
+        let root = &state.storage.root_dir;
+        state.scheduler_mgr = crate::schedule::SchedulerManager::new(root, root.ends_with("data")).ok();
+    }
     if let Some(sched) = &state.scheduler_mgr {
         if let Ok(exe) = std::env::current_exe() {
             if let Err(e) = sched.sync_schedule(&state.config.schedule, &exe) {
@@ -2031,8 +2032,7 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
             1011 => state.open_in_explorer(),
             1001 => state.open_folder_dialog(),
             1002 => {
-                state.catalog.reload();
-                state.rebuild_layout(true, true);
+                state.reload_library();
             }
             1006 => state.random_image(),
             1012 => state.random_all_images(),

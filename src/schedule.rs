@@ -11,12 +11,13 @@ use crate::store::ScheduleConfig;
 pub struct SchedulerManager {
     service: ITaskService,
     pub task_name: String,
+    _apartment: crate::com::ComApartment,
 }
 
 impl SchedulerManager {
     pub fn new(storage_dir: &Path, is_portable: bool) -> Result<Self> {
         unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let apartment = crate::com::ComApartment::enter()?;
             let service: ITaskService = CoCreateInstance(&TaskScheduler, None, CLSCTX_ALL)?;
 
             service.Connect(
@@ -34,7 +35,7 @@ impl SchedulerManager {
                 "AutoUpdate".to_string()
             };
 
-            Ok(Self { service, task_name })
+            Ok(Self { service, task_name, _apartment: apartment })
         }
     }
 

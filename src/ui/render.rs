@@ -150,26 +150,37 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
             || state.gdi_cache.bmp_height != win_h
             || state.gdi_cache.mem_bmp.0.is_null()
         {
-            if !state.gdi_cache.mem_bmp.0.is_null() {
+            let bitmap = CreateCompatibleBitmap(hdc, win_w, win_h);
+            if bitmap.is_invalid() {
+                return;
+            }
+            if SelectObject(state.gdi_cache.mem_dc, bitmap.into()).is_invalid() {
+                let _ = DeleteObject(bitmap.into());
+                return;
+            }
+            if !state.gdi_cache.mem_bmp.is_invalid() {
                 let _ = DeleteObject(state.gdi_cache.mem_bmp.into());
             }
-            state.gdi_cache.mem_bmp = CreateCompatibleBitmap(hdc, win_w, win_h);
+            state.gdi_cache.mem_bmp = bitmap;
             state.gdi_cache.bmp_width = win_w;
             state.gdi_cache.bmp_height = win_h;
-            let _ = SelectObject(state.gdi_cache.mem_dc, state.gdi_cache.mem_bmp.into());
         }
 
         let mem_dc = state.gdi_cache.mem_dc;
-
-        // Modern system GUI font from persistent cache
-        if state.gdi_cache.font.0.is_null() || state.gdi_cache.font_dpi != dpi {
-            if !state.gdi_cache.font.0.is_null() {
-                let _ = DeleteObject(state.gdi_cache.font.into());
+        if state.gdi_cache.font.is_invalid() || state.gdi_cache.font_dpi != dpi {
+            let font = create_gui_font(hwnd, 10, 400);
+            if !font.is_invalid() {
+                if !SelectObject(mem_dc, font.into()).is_invalid() {
+                    if !state.gdi_cache.font.is_invalid() {
+                        let _ = DeleteObject(state.gdi_cache.font.into());
+                    }
+                    state.gdi_cache.font = font;
+                    state.gdi_cache.font_dpi = dpi;
+                } else {
+                    let _ = DeleteObject(font.into());
+                }
             }
-            state.gdi_cache.font = create_gui_font(hwnd, 10, 400);
-            state.gdi_cache.font_dpi = dpi;
         }
-        let _ = SelectObject(mem_dc, state.gdi_cache.font.into());
 
         // Fill background with Google Material 3 Deep Surface
         let bg_brush = CreateSolidBrush(M3_BG);
@@ -325,12 +336,7 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                                 }
                                 ScaleLimit::None => {}
                             }
-                            if let Some(spec) = state
-                                .catalog
-                                .items
-                                .iter()
-                                .find(|it| it.path.to_string_lossy() == c.id.0)
-                                && spec.is_excluded
+                            if state.catalog.excluded_paths.contains(std::path::Path::new(&c.id.0))
                             {
                                 draw_badge(
                                     mem_dc,
@@ -365,12 +371,6 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
             // Normal view
             if let Some(item) = state.catalog.current_item() {
                 let img_id = ImageId(item.path.to_string_lossy().to_string());
-                if !state.cached_images.contains_key(&img_id)
-                    && let Ok(dec) = state.decoder.decode_image(&item.path, Some(4096))
-                {
-                    state.cached_images.insert(img_id.clone(), dec);
-                }
-
                 if let Some(dec) = state.cached_images.get(&img_id) {
                     let fit_scale = (canvas_w as f64 / dec.width as f64)
                         .min(canvas_h as f64 / dec.height as f64)
@@ -419,6 +419,14 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                         SRCCOPY,
                     );
                     let _ = SelectClipRgn(mem_dc, None);
+                } else if let Some(reason) = &item.failure_reason {
+                    let mut rect = RECT {
+                        left: canvas_x, top: canvas_y + canvas_h / 3,
+                        right: canvas_x + canvas_w, bottom: canvas_y + canvas_h,
+                    };
+                    let _ = SetTextColor(mem_dc, M3_TEXT_SECONDARY);
+                    draw_text(mem_dc, &format!("{} を読み込めませんでした\n{}", item.filename, reason),
+                        &mut rect, DT_CENTER | DT_WORDBREAK);
                 }
             } else {
                 let msg = if state.catalog.items.is_empty() {
@@ -451,7 +459,9 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
         }
 
         // Render OSD
-        if let Some((msg_str, _, _, has_undo)) = &state.osd {
+        if state.library_loading() {
+            draw_osd_notification(mem_dc, "画像フォルダを読み込み中…", win_w, false, dpi);
+        } else if let Some((msg_str, _, _, has_undo)) = &state.osd {
             draw_osd_notification(mem_dc, msg_str, win_w, *has_undo, dpi);
         }
 
@@ -605,8 +615,8 @@ fn draw_operation_bar(state: &AppState, hdc: HDC, width: i32, dpi: u32) {
                         r.top,
                         w,
                         h,
-                        "適用",
-                        ModernButtonStyle::Primary,
+                        "壁紙適用",
+                        ModernButtonStyle::SecondaryTonal,
                         radius,
                     );
                 }
@@ -618,7 +628,7 @@ fn draw_operation_bar(state: &AppState, hdc: HDC, width: i32, dpi: u32) {
                         w,
                         h,
                         "ランダム",
-                        ModernButtonStyle::SecondaryTonal,
+                        ModernButtonStyle::Primary,
                         radius,
                     );
                 }

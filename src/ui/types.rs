@@ -31,14 +31,14 @@ impl Default for GdiCache {
 impl Drop for GdiCache {
     fn drop(&mut self) {
         unsafe {
+            if !self.mem_dc.0.is_null() {
+                let _ = DeleteDC(self.mem_dc);
+            }
             if !self.font.0.is_null() {
                 let _ = DeleteObject(self.font.into());
             }
             if !self.mem_bmp.0.is_null() {
                 let _ = DeleteObject(self.mem_bmp.into());
-            }
-            if !self.mem_dc.0.is_null() {
-                let _ = DeleteDC(self.mem_dc);
             }
         }
     }

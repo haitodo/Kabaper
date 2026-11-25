@@ -121,13 +121,70 @@ pub fn plan_has_background_blur(plan: &LayoutPlan) -> bool {
     })
 }
 
+/// Reuse the preview when the slot geometry is unchanged. The background buffer
+/// holds only the blur and black margins so later pan operations can restore them.
+pub(crate) fn update_preview(
+    previous: Option<&LayoutPlan>,
+    plan: &LayoutPlan,
+    images: &HashMap<ImageId, DecodedImage>,
+    dim_ratio: f64,
+    base: &mut Option<ComposedBitmap>,
+    composed: &mut Option<ComposedBitmap>,
+) {
+    let has_blur = plan_has_background_blur(plan);
+    if let (Some(old), Some(bitmap)) = (previous, composed.as_mut())
+        && old.monitor_px == plan.monitor_px
+        && old.frames.len() == plan.frames.len()
+        && old.frames.iter().zip(&plan.frames).all(|(a, b)| a.slot == b.slot)
+        && base.is_some() == has_blur
+    {
+        for (before, after) in old.frames.iter().zip(&plan.frames) {
+            if before.content == after.content {
+                continue;
+            }
+            if let Some(background) = base.as_mut() {
+                restore_slot(background, after.slot, None);
+                if let Some(placed) = &after.content
+                    && placed.blur_sigma > 0.0
+                    && let Some(image) = images.get(&placed.id)
+                {
+                    render_background_blur(background, after.slot, image, placed.blur_sigma, dim_ratio);
+                }
+            }
+            compose_single_frame_foreground(bitmap, after, base.as_ref(), images);
+        }
+        return;
+    }
+
+    *base = None;
+    *composed = None;
+    let background = compose_base_layer(plan, images, dim_ratio);
+    let mut bitmap = if has_blur {
+        let bitmap = background.clone();
+        *base = Some(background);
+        bitmap
+    } else {
+        background
+    };
+    compose_foreground_layer(&mut bitmap, plan, images);
+    *composed = Some(bitmap);
+}
+
 pub fn compose_single_frame_foreground(
     target: &mut ComposedBitmap,
     frame: &crate::layout::FramePlan,
     base: Option<&ComposedBitmap>,
     images: &HashMap<ImageId, DecodedImage>,
 ) {
-    let slot = frame.slot;
+    restore_slot(target, frame.slot, base);
+    if let Some(placed) = &frame.content
+        && let Some(img) = images.get(&placed.id)
+    {
+        render_foreground(target, frame.slot, img, placed);
+    }
+}
+
+fn restore_slot(target: &mut ComposedBitmap, slot: RectPx, base: Option<&ComposedBitmap>) {
     if slot.width == 0 || slot.height == 0 {
         return;
     }
@@ -163,13 +220,6 @@ pub fn compose_single_frame_foreground(
                 let (_, u32_sub, _) = unsafe { sub.align_to_mut::<u32>() };
                 u32_sub.fill(0xFF000000);
             });
-    }
-
-    // Render foreground for this frame
-    if let Some(placed) = &frame.content
-        && let Some(img) = images.get(&placed.id)
-    {
-        render_foreground(target, slot, img, placed);
     }
 }
 
@@ -212,6 +262,25 @@ fn render_foreground(
     let img_w = img.width as i32;
     let img_h = img.height as i32;
     let stride_img = (img.width as usize) * 4;
+
+    // Monitor-sized wallpapers often map exactly to screen pixels.
+    if src_x_start == 0.0 && src_y_start == 0.0
+        && src_w == img.width as f64 && src_h == img.height as f64
+        && fg_dest.width == img.width && fg_dest.height == img.height
+    {
+        let stride = target.width as usize * 4;
+        let left = min_x as usize * 4;
+        let right = max_x as usize * 4;
+        let src_left = (min_x as i32 - fg_dest.x) as usize * 4;
+        let src_top = (min_y as i32 - fg_dest.y) as usize;
+        for (y, row) in target.pixels[min_y as usize * stride..max_y as usize * stride]
+            .chunks_exact_mut(stride).enumerate()
+        {
+            let start = (src_top + y) * stride_img + src_left;
+            row[left..right].copy_from_slice(&img.pixels[start..start + (right - left)]);
+        }
+        return;
+    }
 
     // Precalculate horizontal interpolation parameters (weights & pixel offsets)
     // This turns O(W * H * 16) floating-point calculations into O(W + H)
@@ -696,7 +765,7 @@ fn catmull_rom_weights(t: f32) -> [f32; 4] {
 /// Save ComposedBitmap to an 8-bit sRGB PNG file via WIC atomically
 pub fn save_png_wic(bitmap: &ComposedBitmap, path: &Path) -> Result<()> {
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let _apartment = crate::com::ComApartment::enter()?;
         let factory: IWICImagingFactory =
             CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
 
@@ -770,6 +839,58 @@ use std::os::windows::ffi::OsStrExt;
 mod tests {
     use super::*;
     use crate::layout::*;
+
+    #[test]
+    fn native_size_split_copies_pixels_without_crossing_the_border() {
+        let image = DecodedImage {
+            id: ImageId("native".into()),
+            orig_size: (3, 2),
+            width: 3,
+            height: 2,
+            pixels: (1..=6).flat_map(|v| [v, 0, 0, 255]).collect(),
+        };
+        let spec = ImageSpec { id: image.id.clone(), size_px: image.orig_size };
+        let plan = plan_layout(&LayoutRequest {
+            monitor_px: (7, 2), mode: LayoutMode::Fixed(2), max_scale: 1.0, border_px: 1,
+            frames: vec![FrameInput { image: Some(spec), pinned: false, pan: (0.5, 0.5) }],
+        }, &[]);
+        let rendered = compose_layout(&plan, &HashMap::from([(image.id.clone(), image)]));
+        for y in 0..2 {
+            for x in 0..7 {
+                let expected = if x < 3 { (y * 3 + x + 1) as u8 } else { 0 };
+                assert_eq!(rendered.get_pixel(x, y), (expected, 0, 0, 255));
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_preview_matches_full_recomposition() {
+        let mut images = HashMap::new();
+        let frames: Vec<_> = [20u8, 130, 245].into_iter().map(|value| {
+            let id = ImageId(value.to_string());
+            let size = (12, 9);
+            images.insert(id.clone(), DecodedImage {
+                id: id.clone(), orig_size: size, width: size.0, height: size.1,
+                pixels: [value, 0, value, 255].repeat((size.0 * size.1) as usize),
+            });
+            FrameInput {
+                image: Some(ImageSpec { id, size_px: size }), pinned: false, pan: (0.5, 0.5),
+            }
+        }).collect();
+        let mut req = LayoutRequest {
+            monitor_px: (98, 40), mode: LayoutMode::Fixed(2), max_scale: 1.25,
+            border_px: 2, frames: frames[..2].to_vec(),
+        };
+        let (mut base, mut preview, mut previous) = (None, None, None);
+        for replacement in [Some(frames[0].clone()), Some(frames[2].clone()), None] {
+            req.frames[0].image = replacement.and_then(|frame| frame.image);
+            let plan = plan_layout(&req, &[]);
+            update_preview(previous.as_ref(), &plan, &images, 0.4, &mut base, &mut preview);
+            assert_eq!(preview.as_ref().unwrap().pixels, compose_layout_with_dim(&plan, &images, 0.4).pixels);
+            assert_eq!(base.as_ref().unwrap().pixels, compose_base_layer(&plan, &images, 0.4).pixels);
+            previous = Some(plan);
+        }
+    }
 
     #[test]
     fn test_compose_layout_and_save_png() {

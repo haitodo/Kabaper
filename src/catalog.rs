@@ -101,34 +101,33 @@ impl Catalog {
     }
 
     pub fn open_folder(&mut self, folder: &Path, select_image: Option<&Path>) -> bool {
-        let norm_folder = normalize_path(folder);
-        if !norm_folder.is_dir() {
-            return false;
-        }
+        self.open_folder_while(folder, select_image, &|| true)
+    }
 
-        self.folder = Some(norm_folder.clone());
-        // Spec 2.2: Re-test failed decodes on reload/open
-        self.failed_decodes.clear();
-        self.reload_internal(select_image);
+    pub(crate) fn open_folder_while(
+        &mut self,
+        folder: &Path,
+        select_image: Option<&Path>,
+        active: &dyn Fn() -> bool,
+    ) -> bool {
+        let norm_folder = normalize_path(folder);
+        let Some(found_paths) = collect_images_while(&norm_folder, active) else {
+            return false;
+        };
+        self.replace_items(norm_folder, found_paths, select_image);
         true
     }
 
     pub fn reload(&mut self) {
-        let current_path = self.current_item().map(|it| it.path.clone());
-        // Spec 2.2: Re-test failed decodes on reload
-        self.failed_decodes.clear();
-        self.reload_internal(current_path.as_deref());
+        if let Some(folder) = self.folder.clone() {
+            let selection = self.current_item().map(|it| it.path.clone());
+            self.open_folder(&folder, selection.as_deref());
+        }
     }
 
-    fn reload_internal(&mut self, target_to_select: Option<&Path>) {
-        let Some(folder) = &self.folder else {
-            self.items.clear();
-            self.current_index = None;
-            return;
-        };
-
-        let mut found_paths = collect_images_recursive(folder);
-
+    fn replace_items(&mut self, folder: PathBuf, mut found_paths: Vec<PathBuf>, target_to_select: Option<&Path>) {
+        self.folder = Some(folder.clone());
+        self.failed_decodes.clear();
         // Sort with natural sort order in parallel
         found_paths.par_sort_by(|a, b| natural_cmp(a, b));
 
@@ -136,7 +135,7 @@ impl Catalog {
         self.items = found_paths
             .into_iter()
             .map(|p| {
-                let filename = if let Ok(rel) = p.strip_prefix(folder) {
+                let filename = if let Ok(rel) = p.strip_prefix(&folder) {
                     rel.to_string_lossy().to_string()
                 } else {
                     p.file_name()
@@ -145,12 +144,11 @@ impl Catalog {
                         .to_string()
                 };
                 let is_excluded = self.excluded_paths.contains(&p);
-                let failure_reason = self.failed_decodes.get(&p).cloned();
                 CatalogItem {
                     path: p,
                     filename,
                     is_excluded,
-                    failure_reason,
+                    failure_reason: None,
                 }
             })
             .collect();
@@ -334,7 +332,7 @@ impl Catalog {
         current_path: Option<&Path>,
         excluded_ids: &HashSet<PathBuf>,
     ) -> Option<(usize, PathBuf)> {
-        use rand::seq::IteratorRandom;
+        use rand::{RngExt, seq::IteratorRandom};
 
         if self.items.is_empty() {
             return None;
@@ -353,6 +351,18 @@ impl Catalog {
         };
 
         let mut rng = rand::rng();
+
+        // Uniform probes make the common case independent of library size. If eligible
+        // images are sparse, the exhaustive selection below preserves all priorities.
+        for _ in 0..8 {
+            let idx = rng.random_range(0..self.items.len());
+            let item = &self.items[idx];
+            if !item.is_excluded && item.failure_reason.is_none()
+                && !is_in_excluded_ids(&item.path) && !is_current(&item.path)
+            {
+                return Some((idx, item.path.clone()));
+            }
+        }
 
         // 1. First priority: valid images (!excluded, no failure, not in excluded_ids, and not current)
         let prio1 = self
@@ -423,6 +433,9 @@ impl Catalog {
 
 pub fn strip_unc_prefix(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
+    if let Some(server_path) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{server_path}"));
+    }
     if let Some(stripped) = s.strip_prefix(r"\\?\") {
         PathBuf::from(stripped)
     } else {
@@ -431,18 +444,31 @@ pub fn strip_unc_prefix(path: &Path) -> PathBuf {
 }
 
 pub fn collect_images_recursive(root: &Path) -> Vec<PathBuf> {
+    collect_images_while(&normalize_path(root), &|| true).unwrap_or_default()
+}
+
+fn collect_images_while(root: &Path, active: &dyn Fn() -> bool) -> Option<Vec<PathBuf>> {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
     let mut images = Vec::new();
-    let norm_root = normalize_path(root);
-    let mut dirs_to_visit = vec![norm_root.clone()];
-    let mut visited_dirs = HashSet::new();
-    visited_dirs.insert(norm_root);
+    let mut dirs_to_visit = vec![root.to_path_buf()];
 
     while let Some(current_dir) = dirs_to_visit.pop() {
+        if !active() {
+            return None;
+        }
         let Ok(entries) = fs::read_dir(&current_dir) else {
+            if current_dir == root {
+                return None;
+            }
             continue;
         };
 
         for entry in entries.flatten() {
+            if !active() {
+                return None;
+            }
             let path = entry.path();
             let Ok(file_type) = entry.file_type() else {
                 continue;
@@ -455,17 +481,22 @@ pub fn collect_images_recursive(root: &Path) -> Vec<PathBuf> {
                 {
                     continue;
                 }
-                let clean_dir = strip_unc_prefix(&path);
-                if visited_dirs.insert(clean_dir) {
+                // Follow cloud-backed folders, but not junctions that redirect to
+                // another directory (possibly an ancestor).
+                let redirect = entry.metadata().is_ok_and(|m| {
+                    m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+                        && fs::canonicalize(&path).map_or(true, |p| strip_unc_prefix(&p) != path)
+                });
+                if !redirect {
                     dirs_to_visit.push(path);
                 }
             } else if file_type.is_file() && is_supported_image(&path) {
-                images.push(strip_unc_prefix(&path));
+                images.push(path);
             }
         }
     }
 
-    images
+    Some(images)
 }
 
 pub fn is_supported_image(path: &Path) -> bool {
