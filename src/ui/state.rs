@@ -33,11 +33,6 @@ use super::library::{LibraryLoader, LibraryRequest, LoadedLibrary};
 use crate::ui::render::show_monitor_overlays;
 use crate::ui::types::{FolderLabelMode, ModalDialog, SEQ_COUNTER, ViewMode};
 
-/// 画像切替直後にフォルダ名ラベルを表示しておく時間
-const FOLDER_LABEL_FLASH: Duration = Duration::from_millis(2000);
-/// マウス停止後にホバー中のフォルダ名ラベルを表示しておく時間
-const FOLDER_LABEL_HOVER: Duration = Duration::from_millis(1500);
-
 pub struct AppState {
     pub storage: Storage,
     pub config: AppConfig,
@@ -99,12 +94,8 @@ pub struct AppState {
     pub latest_prefetch_req: Arc<AtomicU64>,
     /// フォルダ名ラベルの表示モード
     pub folder_label_mode: FolderLabelMode,
-    /// 枠ごとに最後に描画した画像ID（画像の切替検出用）
-    folder_label_ids: Vec<Option<String>>,
-    /// 枠ごとの切替直後ラベルの表示期限
-    folder_label_deadlines: Vec<Option<Instant>>,
-    /// ホバー中の枠とラベル表示期限
-    folder_label_hover: Option<(usize, Instant)>,
+    /// 右クリックメニュー表示中など、一時的にフォルダ名ラベルを表示する
+    pub folder_label_peek: bool,
 }
 
 #[derive(Debug)]
@@ -269,10 +260,8 @@ impl AppState {
             prefetch_active: false,
             prefetch_paths: Vec::new(),
             latest_prefetch_req,
-            folder_label_mode: FolderLabelMode::Auto,
-            folder_label_ids: Vec::new(),
-            folder_label_deadlines: Vec::new(),
-            folder_label_hover: None,
+            folder_label_mode: FolderLabelMode::OnDemand,
+            folder_label_peek: false,
         };
 
         state.show_info = state.config.window.show_info;
@@ -328,8 +317,7 @@ impl AppState {
         }
         let needs_timer = self.library_loading() || self.prefetch_active || self.osd.is_some()
             || (self.fullscreen && self.bar_visible)
-            || self.config_dirty
-            || self.folder_label_pending();
+            || self.config_dirty;
 
         unsafe {
             if needs_timer {
@@ -350,97 +338,17 @@ impl AppState {
 
     // ---- フォルダ（種類）名ラベル ----
 
-    fn folder_label_pending(&self) -> bool {
-        self.folder_label_hover.is_some() || self.folder_label_deadlines.iter().any(|d| d.is_some())
-    }
-
-    /// 表示モードを 自動 → 常時 → 非表示 の順に切り替える
+    /// 表示モードを 右クリック時のみ ⇄ 常時表示 で切り替える
     pub fn cycle_folder_label_mode(&mut self) {
         self.folder_label_mode = self.folder_label_mode.next();
-        self.folder_label_deadlines.iter_mut().for_each(|d| *d = None);
-        self.folder_label_hover = None;
         self.config.window.folder_label = self.folder_label_mode.as_config_str().to_string();
         self.mark_config_dirty();
         self.set_osd(format!("フォルダ名表示: {}", self.folder_label_mode.label()), 2, false);
     }
 
-    /// 描画時に枠ごとの画像IDを渡す。前回から画像が変わった枠は一定時間ラベルを表示する。
-    pub fn sync_folder_label_targets(&mut self, ids: &[Option<String>]) {
-        self.folder_label_ids.resize(ids.len(), None);
-        self.folder_label_deadlines.resize(ids.len(), None);
-        let now = Instant::now();
-        let mut flashed = false;
-        for (i, id) in ids.iter().enumerate() {
-            if self.folder_label_ids[i] != *id {
-                self.folder_label_ids[i] = id.clone();
-                if id.is_some() && self.folder_label_mode == FolderLabelMode::Auto {
-                    self.folder_label_deadlines[i] = Some(now + FOLDER_LABEL_FLASH);
-                    flashed = true;
-                }
-            }
-        }
-        if flashed {
-            self.update_timer();
-        }
-    }
-
-    /// 指定枠のフォルダ名ラベルを表示すべきか
-    pub fn is_folder_label_visible(&self, frame_idx: usize) -> bool {
-        match self.folder_label_mode {
-            FolderLabelMode::Off => false,
-            FolderLabelMode::Always => true,
-            FolderLabelMode::Auto => {
-                let now = Instant::now();
-                let flashing = self
-                    .folder_label_deadlines
-                    .get(frame_idx)
-                    .copied()
-                    .flatten()
-                    .is_some_and(|t| t > now);
-                let hovered = self
-                    .folder_label_hover
-                    .is_some_and(|(i, t)| i == frame_idx && t > now);
-                flashing || hovered
-            }
-        }
-    }
-
-    /// マウス移動時に呼ぶ。`frame_idx` はカーソル下の枠（なければ None）。
-    /// 再描画が必要な場合 true を返す。
-    pub fn set_folder_label_hover(&mut self, frame_idx: Option<usize>) -> bool {
-        if self.folder_label_mode != FolderLabelMode::Auto {
-            return false;
-        }
-        let now = Instant::now();
-        let prev_visible = self.folder_label_hover.filter(|(_, t)| *t > now).map(|(i, _)| i);
-        match frame_idx {
-            Some(i) => {
-                self.folder_label_hover = Some((i, now + FOLDER_LABEL_HOVER));
-                self.update_timer();
-                prev_visible != Some(i)
-            }
-            None => {
-                self.folder_label_hover = None;
-                prev_visible.is_some()
-            }
-        }
-    }
-
-    /// タイマーから呼ぶ。表示期限が切れたラベルがあれば true（再描画が必要）。
-    pub fn tick_folder_labels(&mut self) -> bool {
-        let now = Instant::now();
-        let mut changed = false;
-        for d in self.folder_label_deadlines.iter_mut() {
-            if d.is_some_and(|t| t <= now) {
-                *d = None;
-                changed = true;
-            }
-        }
-        if self.folder_label_hover.is_some_and(|(_, t)| t <= now) {
-            self.folder_label_hover = None;
-            changed = true;
-        }
-        changed
+    /// フォルダ名ラベルを表示すべきか（常時表示モード、または右クリックメニュー表示中）
+    pub fn is_folder_label_visible(&self) -> bool {
+        self.folder_label_mode == FolderLabelMode::Always || self.folder_label_peek
     }
 
     pub fn has_pinned_frames(&self) -> bool {

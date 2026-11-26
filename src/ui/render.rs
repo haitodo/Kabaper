@@ -211,19 +211,6 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                 state.rebuild_layout(false, false);
             }
 
-            // フォルダ名ラベル: 枠ごとの画像切替を検出
-            let label_ids: Vec<Option<String>> = state
-                .active_plan
-                .as_ref()
-                .map(|p| {
-                    p.frames
-                        .iter()
-                        .map(|f| f.content.as_ref().map(|c| c.id.0.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            state.sync_folder_label_targets(&label_ids);
-
             if let Some(composed) = &state.active_composed {
                 let (mw, mh) = (composed.width as f64, composed.height as f64);
                 let fit_scale = (canvas_w as f64 / mw).min(canvas_h as f64 / mh);
@@ -362,16 +349,18 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                                 badge_y += badge_step;
                             }
 
-                            // フォルダ（種類）名ラベル: 枠の左上（状態バッジがあればその下）に一時表示
-                            if state.is_folder_label_visible(i) {
-                                let label = state.catalog.folder_label_for(std::path::Path::new(&c.id.0));
+                            // フォルダ（種類）名ラベル: 枠の左上（状態バッジがあればその下）
+                            if state.is_folder_label_visible() {
+                                let segments = state
+                                    .catalog
+                                    .folder_label_segments(std::path::Path::new(&c.id.0));
                                 let frame_r = RECT {
                                     left: fx,
                                     top: fy,
                                     right: fx + fw,
                                     bottom: fy + fh,
                                 };
-                                draw_folder_label(mem_dc, &label, &frame_r, badge_y, dpi);
+                                draw_folder_label(mem_dc, &segments, &frame_r, badge_y, dpi);
                             }
                         } else {
                             draw_badge(
@@ -395,14 +384,6 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
             }
         } else {
             // Normal view
-            let label_ids = vec![
-                state
-                    .catalog
-                    .current_item()
-                    .map(|it| it.path.to_string_lossy().to_string()),
-            ];
-            state.sync_folder_label_targets(&label_ids);
-
             if let Some(item) = state.catalog.current_item() {
                 let img_id = ImageId(item.path.to_string_lossy().to_string());
                 if let Some(dec) = state.cached_images.get(&img_id) {
@@ -454,17 +435,17 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                     );
                     let _ = SelectClipRgn(mem_dc, None);
 
-                    // フォルダ（種類）名ラベル: 表示中の画像の左上に一時表示
-                    if state.is_folder_label_visible(0) {
+                    // フォルダ（種類）名ラベル: 表示中の画像の左上
+                    if state.is_folder_label_visible() {
                         let visible_r = RECT {
                             left: ox.max(canvas_x),
                             top: oy.max(canvas_y),
                             right: (ox + dw).min(canvas_x + canvas_w),
                             bottom: (oy + dh).min(canvas_y + canvas_h),
                         };
-                        let label = state.catalog.folder_label_for(&item.path);
+                        let segments = state.catalog.folder_label_segments(&item.path);
                         let label_top = visible_r.top + scale_by_dpi(8, dpi);
-                        draw_folder_label(mem_dc, &label, &visible_r, label_top, dpi);
+                        draw_folder_label(mem_dc, &segments, &visible_r, label_top, dpi);
                     }
                 } else if let Some(reason) = &item.failure_reason {
                     let mut rect = RECT {
@@ -917,9 +898,13 @@ fn draw_badge(hdc: HDC, x: i32, y: i32, text: &str, color: COLORREF, dpi: u32) {
     }
 }
 
-/// 画像が属するフォルダ（種類）名を `area` の左端・縦位置 `top` に小さなラベルで描画する。
-/// 領域が狭すぎる場合は描画しない。
-fn draw_folder_label(hdc: HDC, text: &str, area: &RECT, top: i32, dpi: u32) {
+/// 画像が属するフォルダ（種類）の階層を `area` の左端・縦位置 `top` にパンくず形式で描画する。
+/// 上位階層は控えめな色、最下層（画像が直接入っているフォルダ）は強調色で区別する。
+/// 幅が足りない場合は上位階層から「…」に省略し、領域が狭すぎる場合は描画しない。
+fn draw_folder_label(hdc: HDC, segments: &[String], area: &RECT, top: i32, dpi: u32) {
+    if segments.is_empty() {
+        return;
+    }
     unsafe {
         let margin = scale_by_dpi(8, dpi);
         let pad_x = scale_by_dpi(10, dpi);
@@ -929,10 +914,30 @@ fn draw_folder_label(hdc: HDC, text: &str, area: &RECT, top: i32, dpi: u32) {
             return;
         }
 
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        let mut size = SIZE::default();
-        let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
-        let w = (size.cx + pad_x * 2).min(max_w);
+        let measure = |s: &str| -> i32 {
+            let wide: Vec<u16> = s.encode_utf16().collect();
+            let mut size = SIZE::default();
+            let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
+            size.cx
+        };
+        const SEP: &str = "  ›  ";
+        const ELLIPSIS: &str = "…";
+        let sep_w = measure(SEP);
+        let ell_w = measure(ELLIPSIS);
+        let widths: Vec<i32> = segments.iter().map(|s| measure(s)).collect();
+        let n = segments.len();
+        let content_w = |start: usize| -> i32 {
+            let head = if start > 0 { ell_w + sep_w } else { 0 };
+            head + widths[start..].iter().sum::<i32>() + sep_w * (n - start - 1) as i32
+        };
+
+        // 幅に収まるまで上位階層を省略（最下層は必ず残す）
+        let avail = max_w - pad_x * 2;
+        let mut start = 0;
+        while start + 1 < n && content_w(start) > avail {
+            start += 1;
+        }
+        let w = content_w(start).min(avail) + pad_x * 2;
 
         let r = RECT {
             left: area.left + margin,
@@ -940,25 +945,50 @@ fn draw_folder_label(hdc: HDC, text: &str, area: &RECT, top: i32, dpi: u32) {
             right: area.left + margin + w,
             bottom: top + h,
         };
-        fill_alpha_rect(hdc, &r, M3_SURFACE_CARD, 200);
+        fill_alpha_rect(hdc, &r, M3_SURFACE_CARD, 215);
 
         let border_brush = CreateSolidBrush(M3_OUTLINE);
         let _ = FrameRect(hdc, &r, border_brush);
         let _ = DeleteObject(border_brush.into());
 
         let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
-        let mut tr = RECT {
-            left: r.left + pad_x,
-            right: r.right - pad_x,
-            ..r
-        };
-        draw_text(
-            hdc,
-            text,
-            &mut tr,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
-        );
+
+        // (テキスト, 幅, 色) の並びを左から描画
+        let mut pieces: Vec<(&str, i32, COLORREF)> = Vec::new();
+        if start > 0 {
+            pieces.push((ELLIPSIS, ell_w, M3_TEXT_MUTED));
+            pieces.push((SEP, sep_w, M3_TEXT_MUTED));
+        }
+        for (i, seg) in segments.iter().enumerate().skip(start) {
+            let is_leaf = i + 1 == n;
+            let color = if is_leaf { M3_TEXT_PRIMARY } else { M3_TEXT_SECONDARY };
+            pieces.push((seg.as_str(), widths[i], color));
+            if !is_leaf {
+                pieces.push((SEP, sep_w, M3_PRIMARY_ACCENT));
+            }
+        }
+
+        let text_right = r.right - pad_x;
+        let mut x = r.left + pad_x;
+        for (text, pw, color) in pieces {
+            if x >= text_right {
+                break;
+            }
+            let mut tr = RECT {
+                left: x,
+                top: r.top,
+                right: (x + pw).min(text_right),
+                bottom: r.bottom,
+            };
+            let _ = SetTextColor(hdc, color);
+            draw_text(
+                hdc,
+                text,
+                &mut tr,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+            );
+            x += pw;
+        }
     }
 }
 
@@ -1739,7 +1769,7 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
             ("Ctrl+O", "フォルダ選択"),
             ("Ctrl+Shift+O", "ファイルの場所を開く"),
             ("F5", "再読込"),
-            ("I / F", "情報表示 / フォルダ名表示 切替"),
+            ("I / F", "情報表示 / フォルダ名常時表示 切替"),
             ("F11 / Alt+Enter", "全画面切替"),
             ("Esc", "閉じる"),
         ];

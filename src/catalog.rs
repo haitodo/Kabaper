@@ -85,9 +85,9 @@ impl Catalog {
         }
     }
 
-    /// 画像が属するフォルダ（種類）の表示名を返す。
-    /// 開いているフォルダからの相対パス（例: `動物 / 猫`）。直下の画像はルートフォルダ名。
-    pub fn folder_label_for(&self, path: &Path) -> String {
+    /// 画像が属するフォルダ（種類）の階層を上位から順に返す。
+    /// 開いているフォルダからの相対パス（例: `["動物", "猫"]`）。直下の画像はルートフォルダ名のみ。
+    pub fn folder_label_segments(&self, path: &Path) -> Vec<String> {
         let parent = path.parent().unwrap_or(Path::new(""));
         let name_of = |p: &Path, fallback: &str| {
             p.file_name()
@@ -96,7 +96,7 @@ impl Catalog {
         };
         if let Some(root) = &self.folder {
             if parent == root.as_path() {
-                return name_of(root, "ルート");
+                return vec![name_of(root, "ルート")];
             }
             if let Ok(rel) = parent.strip_prefix(root) {
                 let parts: Vec<String> = rel
@@ -104,11 +104,11 @@ impl Catalog {
                     .map(|c| c.as_os_str().to_string_lossy().to_string())
                     .collect();
                 if !parts.is_empty() {
-                    return parts.join(" / ");
+                    return parts;
                 }
             }
         }
-        name_of(parent, "フォルダ")
+        vec![name_of(parent, "フォルダ")]
     }
 
     pub fn find_index_by_path(&self, path: &Path) -> Option<usize> {

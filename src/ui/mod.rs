@@ -210,73 +210,56 @@ mod tests {
     }
 
     #[test]
-    fn test_folder_label_for_category_folders() {
+    fn test_folder_label_segments_for_category_folders() {
         let root = PathBuf::from("C:\\photos");
         let mut catalog = Catalog::new(HashSet::new());
         catalog.folder = Some(root.clone());
 
-        assert_eq!(catalog.folder_label_for(&root.join("風景").join("a.jpg")), "風景");
+        assert_eq!(catalog.folder_label_segments(&root.join("風景").join("a.jpg")), vec!["風景"]);
+        // 複数階層は階層ごとに分けて返す
         assert_eq!(
-            catalog.folder_label_for(&root.join("動物").join("猫").join("b.jpg")),
-            "動物 / 猫"
+            catalog.folder_label_segments(&root.join("動物").join("猫").join("子猫").join("b.jpg")),
+            vec!["動物", "猫", "子猫"]
         );
         // ルート直下はルートフォルダ名
-        assert_eq!(catalog.folder_label_for(&root.join("c.jpg")), "photos");
+        assert_eq!(catalog.folder_label_segments(&root.join("c.jpg")), vec!["photos"]);
     }
 
     #[test]
     fn test_folder_label_mode_cycle_and_config_roundtrip() {
-        let m = FolderLabelMode::Auto;
+        let m = FolderLabelMode::OnDemand;
         assert_eq!(m.next(), FolderLabelMode::Always);
-        assert_eq!(m.next().next(), FolderLabelMode::Off);
-        assert_eq!(m.next().next().next(), FolderLabelMode::Auto);
-        for mode in [FolderLabelMode::Auto, FolderLabelMode::Always, FolderLabelMode::Off] {
+        assert_eq!(m.next().next(), FolderLabelMode::OnDemand);
+        for mode in [FolderLabelMode::OnDemand, FolderLabelMode::Always] {
             assert_eq!(FolderLabelMode::from_config(mode.as_config_str()), mode);
         }
-        assert_eq!(FolderLabelMode::from_config("unknown"), FolderLabelMode::Auto);
+        // 旧設定値・不明値は右クリック時のみ
+        assert_eq!(FolderLabelMode::from_config("auto"), FolderLabelMode::OnDemand);
+        assert_eq!(FolderLabelMode::from_config("off"), FolderLabelMode::OnDemand);
     }
 
     #[test]
-    fn test_folder_label_visibility_flash_and_hover() {
+    fn test_folder_label_visible_only_on_demand() {
         let temp = std::env::temp_dir().join(format!("kabaper_test_folder_label_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         std::fs::create_dir_all(&temp).unwrap();
         let storage = crate::store::Storage::init_with_dir(temp.join("storage")).unwrap();
         let mut state = AppState::new(storage, crate::store::AppConfig::default(), None).unwrap();
-        state.folder_label_mode = FolderLabelMode::Auto;
 
-        let a = Some("C:\\photos\\風景\\a.jpg".to_string());
-        let b = Some("C:\\photos\\動物\\b.jpg".to_string());
+        // 既定は右クリック時のみ: 通常は非表示
+        assert_eq!(state.folder_label_mode, FolderLabelMode::OnDemand);
+        assert!(!state.is_folder_label_visible());
+        // 右クリックメニュー表示中のみ表示
+        state.folder_label_peek = true;
+        assert!(state.is_folder_label_visible());
+        state.folder_label_peek = false;
+        assert!(!state.is_folder_label_visible());
 
-        // 初回の描画: 画像が現れた枠はラベルを一時表示
-        state.sync_folder_label_targets(&[a.clone(), b.clone()]);
-        assert!(state.is_folder_label_visible(0));
-        assert!(state.is_folder_label_visible(1));
-
-        // 期限切れを模擬（tick で消える）
-        std::thread::sleep(std::time::Duration::from_millis(2100));
-        assert!(state.tick_folder_labels());
-        assert!(!state.is_folder_label_visible(0));
-        assert!(!state.is_folder_label_visible(1));
-
-        // 枠1の画像だけ変わった場合は枠1のみ表示
-        state.sync_folder_label_targets(&[a.clone(), a.clone()]);
-        assert!(!state.is_folder_label_visible(0));
-        assert!(state.is_folder_label_visible(1));
-
-        // ホバー: カーソル下の枠のみ表示、外れたら消える
-        assert!(state.set_folder_label_hover(Some(0)));
-        assert!(state.is_folder_label_visible(0));
-        assert!(!state.set_folder_label_hover(Some(0)), "同じ枠なら再描画不要");
-        assert!(state.set_folder_label_hover(None));
-        assert!(!state.is_folder_label_visible(0));
-
-        // 常時 / 非表示
-        state.folder_label_mode = FolderLabelMode::Always;
-        assert!(state.is_folder_label_visible(0));
-        state.folder_label_mode = FolderLabelMode::Off;
-        assert!(!state.is_folder_label_visible(1));
-        assert!(!state.set_folder_label_hover(Some(1)));
+        // F で常時表示へ切替、設定にも保存される
+        state.cycle_folder_label_mode();
+        assert_eq!(state.folder_label_mode, FolderLabelMode::Always);
+        assert_eq!(state.config.window.folder_label, "always");
+        assert!(state.is_folder_label_visible());
 
         let _ = std::fs::remove_dir_all(&temp);
     }

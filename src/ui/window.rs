@@ -306,11 +306,6 @@ unsafe extern "system" fn wnd_proc(
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
 
-                // フォルダ名ラベルの表示期限切れ
-                if state.tick_folder_labels() {
-                    let _ = InvalidateRect(Some(hwnd), None, false);
-                }
-
                 // Fullscreen bar auto-hide after 3s
                 if state.fullscreen
                     && state.bar_visible
@@ -457,18 +452,6 @@ unsafe extern "system" fn wnd_proc(
                     state.bar_visible = true;
                     state.update_timer();
                     let _ = InvalidateRect(Some(hwnd), None, false);
-                }
-
-                // フォルダ名ラベル: カーソル下の枠に一時表示
-                if state.folder_label_mode == FolderLabelMode::Auto {
-                    let hovered = if state.modal_dialog == ModalDialog::None {
-                        folder_label_hover_target(state, hwnd, x, y)
-                    } else {
-                        None
-                    };
-                    if state.set_folder_label_hover(hovered) {
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                    }
                 }
 
                 if state.is_panning {
@@ -735,9 +718,6 @@ unsafe extern "system" fn wnd_proc(
             WM_MOUSELEAVE => {
                 if state.sidebar_scrollbar_hovered {
                     state.sidebar_scrollbar_hovered = false;
-                    let _ = InvalidateRect(Some(hwnd), None, false);
-                }
-                if state.set_folder_label_hover(None) {
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 LRESULT(0)
@@ -1374,34 +1354,6 @@ fn pan_by_keyboard(state: &mut AppState, key: VIRTUAL_KEY) {
         }
         if changed {
             state.update_pan_fast(state.selected_frame_idx, new_pan);
-        }
-    }
-}
-
-/// フォルダ名ラベルを表示すべきカーソル下の枠を返す（通常表示では画像があれば 0）。
-fn folder_label_hover_target(state: &AppState, hwnd: HWND, x: i32, y: i32) -> Option<usize> {
-    unsafe {
-        let mut cr = RECT::default();
-        let _ = GetClientRect(hwnd, &mut cr);
-        let dpi = get_window_dpi(hwnd);
-        let bar_h = if state.bar_visible { get_bar_height(dpi) } else { 0 };
-        let canvas = get_canvas_layout(
-            cr.right,
-            cr.bottom,
-            bar_h,
-            state.show_sidebar,
-            state.show_filmstrip,
-            dpi,
-        );
-        if x < canvas.x || x >= canvas.x + canvas.w || y < canvas.y || y >= canvas.y + canvas.h {
-            return None;
-        }
-        match state.view_mode {
-            ViewMode::Composite => state
-                .active_plan
-                .as_ref()
-                .and_then(|plan| composite_frame_index_at(plan, canvas, x, y)),
-            ViewMode::Normal => state.catalog.current_item().map(|_| 0),
         }
     }
 }
@@ -2086,13 +2038,18 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
         let _ = AppendMenuW(menu, MF_STRING, 1007, w!("スマートパン (被写体/顔自動合わせ: A)"));
         let _ = AppendMenuW(menu, MF_STRING, 1008, w!("フィルムストリップ表示切替 (T)"));
-        let _ = AppendMenuW(menu, MF_STRING, 1013, w!("フォルダ名表示切替 (F)"));
+        let _ = AppendMenuW(menu, MF_STRING, 1013, w!("フォルダ名の常時表示 切替 (F)"));
         let _ = AppendMenuW(menu, MF_STRING, 1009, w!("壁紙プリセット切替 (P)"));
         let _ = AppendMenuW(menu, MF_STRING, 1010, w!("現在の構成をプリセット保存 (Ctrl+P)"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
         let _ = AppendMenuW(menu, MF_STRING, 1003, w!("除外一覧"));
         let _ = AppendMenuW(menu, MF_STRING, 1004, w!("設定"));
         let _ = AppendMenuW(menu, MF_STRING, 1005, w!("操作一覧 (F1)"));
+
+        // メニューを開いている間だけフォルダ名ラベルを表示する
+        state.folder_label_peek = true;
+        let _ = InvalidateRect(Some(hwnd), None, false);
+        let _ = UpdateWindow(hwnd);
 
         let _ = SetForegroundWindow(hwnd);
         let cmd = TrackPopupMenu(
@@ -2105,6 +2062,9 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
             None,
         );
         let _ = DestroyMenu(menu);
+
+        state.folder_label_peek = false;
+        let _ = InvalidateRect(Some(hwnd), None, false);
 
         match cmd.0 as u32 {
             1011 => state.open_in_explorer(),

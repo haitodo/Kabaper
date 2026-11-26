@@ -141,7 +141,7 @@ fn default_true() -> bool {
 }
 
 fn default_folder_label() -> String {
-    "auto".to_string()
+    "on_demand".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,7 +156,7 @@ pub struct WindowConfig {
     pub show_info: bool,
     #[serde(default = "default_true")]
     pub always_on_top: bool,
-    /// フォルダ名ラベルの表示モード: "auto" | "always" | "off"
+    /// フォルダ名ラベルの表示モード: "on_demand"（右クリック時のみ） | "always"
     #[serde(default = "default_folder_label")]
     pub folder_label: String,
 }
