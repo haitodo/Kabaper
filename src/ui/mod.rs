@@ -210,6 +210,107 @@ mod tests {
     }
 
     #[test]
+    fn test_folder_label_for_category_folders() {
+        let root = PathBuf::from("C:\\photos");
+        let mut catalog = Catalog::new(HashSet::new());
+        catalog.folder = Some(root.clone());
+
+        assert_eq!(catalog.folder_label_for(&root.join("風景").join("a.jpg")), "風景");
+        assert_eq!(
+            catalog.folder_label_for(&root.join("動物").join("猫").join("b.jpg")),
+            "動物 / 猫"
+        );
+        // ルート直下はルートフォルダ名
+        assert_eq!(catalog.folder_label_for(&root.join("c.jpg")), "photos");
+    }
+
+    #[test]
+    fn test_folder_label_mode_cycle_and_config_roundtrip() {
+        let m = FolderLabelMode::Auto;
+        assert_eq!(m.next(), FolderLabelMode::Always);
+        assert_eq!(m.next().next(), FolderLabelMode::Off);
+        assert_eq!(m.next().next().next(), FolderLabelMode::Auto);
+        for mode in [FolderLabelMode::Auto, FolderLabelMode::Always, FolderLabelMode::Off] {
+            assert_eq!(FolderLabelMode::from_config(mode.as_config_str()), mode);
+        }
+        assert_eq!(FolderLabelMode::from_config("unknown"), FolderLabelMode::Auto);
+    }
+
+    #[test]
+    fn test_folder_label_visibility_flash_and_hover() {
+        let temp = std::env::temp_dir().join(format!("kabaper_test_folder_label_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let storage = crate::store::Storage::init_with_dir(temp.join("storage")).unwrap();
+        let mut state = AppState::new(storage, crate::store::AppConfig::default(), None).unwrap();
+        state.folder_label_mode = FolderLabelMode::Auto;
+
+        let a = Some("C:\\photos\\風景\\a.jpg".to_string());
+        let b = Some("C:\\photos\\動物\\b.jpg".to_string());
+
+        // 初回の描画: 画像が現れた枠はラベルを一時表示
+        state.sync_folder_label_targets(&[a.clone(), b.clone()]);
+        assert!(state.is_folder_label_visible(0));
+        assert!(state.is_folder_label_visible(1));
+
+        // 期限切れを模擬（tick で消える）
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        assert!(state.tick_folder_labels());
+        assert!(!state.is_folder_label_visible(0));
+        assert!(!state.is_folder_label_visible(1));
+
+        // 枠1の画像だけ変わった場合は枠1のみ表示
+        state.sync_folder_label_targets(&[a.clone(), a.clone()]);
+        assert!(!state.is_folder_label_visible(0));
+        assert!(state.is_folder_label_visible(1));
+
+        // ホバー: カーソル下の枠のみ表示、外れたら消える
+        assert!(state.set_folder_label_hover(Some(0)));
+        assert!(state.is_folder_label_visible(0));
+        assert!(!state.set_folder_label_hover(Some(0)), "同じ枠なら再描画不要");
+        assert!(state.set_folder_label_hover(None));
+        assert!(!state.is_folder_label_visible(0));
+
+        // 常時 / 非表示
+        state.folder_label_mode = FolderLabelMode::Always;
+        assert!(state.is_folder_label_visible(0));
+        state.folder_label_mode = FolderLabelMode::Off;
+        assert!(!state.is_folder_label_visible(1));
+        assert!(!state.set_folder_label_hover(Some(1)));
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_composite_frame_index_at_hover() {
+        use crate::layout::{FramePlan, LayoutPlan, RectPx, SplitAxis};
+
+        let frame = |x: i32| FramePlan {
+            slot: RectPx { x, y: 0, width: 960, height: 1080 },
+            content: None,
+            pinned: false,
+            pan: (0.5, 0.5),
+        };
+        let plan = LayoutPlan {
+            monitor_px: (1920, 1080),
+            resolved_count: 2,
+            axis: SplitAxis::Horizontal,
+            frames: vec![frame(0), frame(960)],
+            coverage: 1.0,
+        };
+        // fit_scale = 0.5, プレビュー原点 = (280, 45)
+        let canvas = CanvasLayout { x: 280, y: 45, w: 960, h: 540 };
+
+        assert_eq!(composite_frame_index_at(&plan, canvas, 380, 145), Some(0));
+        assert_eq!(composite_frame_index_at(&plan, canvas, 880, 145), Some(1));
+        assert_eq!(composite_frame_index_at(&plan, canvas, 280 + 479, 300), Some(0));
+        assert_eq!(composite_frame_index_at(&plan, canvas, 280 + 481, 300), Some(1));
+        // サイドバー上・プレビュー外
+        assert_eq!(composite_frame_index_at(&plan, canvas, 100, 145), None);
+        assert_eq!(composite_frame_index_at(&plan, canvas, 380, 45 + 541), None);
+    }
+
+    #[test]
     fn test_shortcuts_modal_layout_and_close_button_hit() {
         let win_w = 1920;
         let win_h = 1080;

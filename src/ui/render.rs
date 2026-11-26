@@ -211,6 +211,19 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                 state.rebuild_layout(false, false);
             }
 
+            // フォルダ名ラベル: 枠ごとの画像切替を検出
+            let label_ids: Vec<Option<String>> = state
+                .active_plan
+                .as_ref()
+                .map(|p| {
+                    p.frames
+                        .iter()
+                        .map(|f| f.content.as_ref().map(|c| c.id.0.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            state.sync_folder_label_targets(&label_ids);
+
             if let Some(composed) = &state.active_composed {
                 let (mw, mh) = (composed.width as f64, composed.height as f64);
                 let fit_scale = (canvas_w as f64 / mw).min(canvas_h as f64 / mh);
@@ -346,6 +359,19 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                                     COLORREF(0x003333FF),
                                     dpi,
                                 );
+                                badge_y += badge_step;
+                            }
+
+                            // フォルダ（種類）名ラベル: 枠の左上（状態バッジがあればその下）に一時表示
+                            if state.is_folder_label_visible(i) {
+                                let label = state.catalog.folder_label_for(std::path::Path::new(&c.id.0));
+                                let frame_r = RECT {
+                                    left: fx,
+                                    top: fy,
+                                    right: fx + fw,
+                                    bottom: fy + fh,
+                                };
+                                draw_folder_label(mem_dc, &label, &frame_r, badge_y, dpi);
                             }
                         } else {
                             draw_badge(
@@ -369,6 +395,14 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
             }
         } else {
             // Normal view
+            let label_ids = vec![
+                state
+                    .catalog
+                    .current_item()
+                    .map(|it| it.path.to_string_lossy().to_string()),
+            ];
+            state.sync_folder_label_targets(&label_ids);
+
             if let Some(item) = state.catalog.current_item() {
                 let img_id = ImageId(item.path.to_string_lossy().to_string());
                 if let Some(dec) = state.cached_images.get(&img_id) {
@@ -419,6 +453,19 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                         SRCCOPY,
                     );
                     let _ = SelectClipRgn(mem_dc, None);
+
+                    // フォルダ（種類）名ラベル: 表示中の画像の左上に一時表示
+                    if state.is_folder_label_visible(0) {
+                        let visible_r = RECT {
+                            left: ox.max(canvas_x),
+                            top: oy.max(canvas_y),
+                            right: (ox + dw).min(canvas_x + canvas_w),
+                            bottom: (oy + dh).min(canvas_y + canvas_h),
+                        };
+                        let label = state.catalog.folder_label_for(&item.path);
+                        let label_top = visible_r.top + scale_by_dpi(8, dpi);
+                        draw_folder_label(mem_dc, &label, &visible_r, label_top, dpi);
+                    }
                 } else if let Some(reason) = &item.failure_reason {
                     let mut rect = RECT {
                         left: canvas_x, top: canvas_y + canvas_h / 3,
@@ -867,6 +914,51 @@ fn draw_badge(hdc: HDC, x: i32, y: i32, text: &str, color: COLORREF, dpi: u32) {
         let _ = SetTextColor(hdc, M3_PRIMARY_TEXT);
         let mut tr = r;
         draw_text(hdc, text, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+/// 画像が属するフォルダ（種類）名を `area` の左端・縦位置 `top` に小さなラベルで描画する。
+/// 領域が狭すぎる場合は描画しない。
+fn draw_folder_label(hdc: HDC, text: &str, area: &RECT, top: i32, dpi: u32) {
+    unsafe {
+        let margin = scale_by_dpi(8, dpi);
+        let pad_x = scale_by_dpi(10, dpi);
+        let h = scale_by_dpi(24, dpi);
+        let max_w = area.right - area.left - margin * 2;
+        if max_w < scale_by_dpi(48, dpi) || top + h > area.bottom - margin {
+            return;
+        }
+
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let mut size = SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
+        let w = (size.cx + pad_x * 2).min(max_w);
+
+        let r = RECT {
+            left: area.left + margin,
+            top,
+            right: area.left + margin + w,
+            bottom: top + h,
+        };
+        fill_alpha_rect(hdc, &r, M3_SURFACE_CARD, 200);
+
+        let border_brush = CreateSolidBrush(M3_OUTLINE);
+        let _ = FrameRect(hdc, &r, border_brush);
+        let _ = DeleteObject(border_brush.into());
+
+        let _ = SetBkMode(hdc, TRANSPARENT);
+        let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
+        let mut tr = RECT {
+            left: r.left + pad_x,
+            right: r.right - pad_x,
+            ..r
+        };
+        draw_text(
+            hdc,
+            text,
+            &mut tr,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
     }
 }
 
@@ -1617,9 +1709,9 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
         draw_text(hdc, "操作一覧", &mut tr, DT_LEFT | DT_SINGLELINE);
 
         let lines = [
-            ("ホイール / → / ← / ↑ / ↓", "画像送り"),
+            ("ホイール / → / ← / ↑ / ↓", "画像送り (合成: ホイールはホバー枠)"),
             ("Shift+R / Ctrl+R", "画像のランダム入替 (選択枠)"),
-            ("Ctrl+Shift+R", "全枠の画像をランダム入替"),
+            ("Q / マウス側面ボタン", "全枠の画像をランダム入替"),
             ("Home / End", "先頭 / 末尾"),
             ("V / 中クリック", "通常 / 合成 切替"),
             ("Z / 0", "通常表示: 等倍切替 / リセット"),
@@ -1647,7 +1739,7 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
             ("Ctrl+O", "フォルダ選択"),
             ("Ctrl+Shift+O", "ファイルの場所を開く"),
             ("F5", "再読込"),
-            ("I", "情報表示切替"),
+            ("I / F", "情報表示 / フォルダ名表示 切替"),
             ("F11 / Alt+Enter", "全画面切替"),
             ("Esc", "閉じる"),
         ];

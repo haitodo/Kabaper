@@ -152,6 +152,36 @@ pub fn get_canvas_layout(
     CanvasLayout { x, y, w, h }
 }
 
+/// 合成表示のプレビュー上でクライアント座標 `(x, y)` に位置する枠のインデックスを返す。
+/// プレビューはキャンバス中央にアスペクト比を保って縮小表示される前提。
+pub fn composite_frame_index_at(
+    plan: &crate::layout::LayoutPlan,
+    canvas: CanvasLayout,
+    x: i32,
+    y: i32,
+) -> Option<usize> {
+    let (mw, mh) = plan.monitor_px;
+    if mw == 0 || mh == 0 {
+        return None;
+    }
+    let fit_scale = (canvas.w as f64 / mw as f64).min(canvas.h as f64 / mh as f64);
+    if fit_scale <= 0.0 {
+        return None;
+    }
+    let ox = canvas.x as f64 + (canvas.w as f64 - mw as f64 * fit_scale) / 2.0;
+    let oy = canvas.y as f64 + (canvas.h as f64 - mh as f64 * fit_scale) / 2.0;
+    let rel_x = (x as f64 - ox) / fit_scale;
+    let rel_y = (y as f64 - oy) / fit_scale;
+
+    plan.frames.iter().position(|frame| {
+        let s = frame.slot;
+        rel_x >= s.x as f64
+            && rel_x < s.x as f64 + s.width as f64
+            && rel_y >= s.y as f64
+            && rel_y < s.y as f64 + s.height as f64
+    })
+}
+
 pub fn get_operation_bar_buttons(dpi: u32) -> Vec<(BarButtonId, RECT)> {
     let pad_x = scale_by_dpi(10, dpi);
     let gap = scale_by_dpi(6, dpi);

@@ -85,6 +85,32 @@ impl Catalog {
         }
     }
 
+    /// 画像が属するフォルダ（種類）の表示名を返す。
+    /// 開いているフォルダからの相対パス（例: `動物 / 猫`）。直下の画像はルートフォルダ名。
+    pub fn folder_label_for(&self, path: &Path) -> String {
+        let parent = path.parent().unwrap_or(Path::new(""));
+        let name_of = |p: &Path, fallback: &str| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| fallback.to_string())
+        };
+        if let Some(root) = &self.folder {
+            if parent == root.as_path() {
+                return name_of(root, "ルート");
+            }
+            if let Ok(rel) = parent.strip_prefix(root) {
+                let parts: Vec<String> = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().to_string())
+                    .collect();
+                if !parts.is_empty() {
+                    return parts.join(" / ");
+                }
+            }
+        }
+        name_of(parent, "フォルダ")
+    }
+
     pub fn find_index_by_path(&self, path: &Path) -> Option<usize> {
         if let Some(&idx) = self.path_indices.get(path) {
             return Some(idx);

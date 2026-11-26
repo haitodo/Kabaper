@@ -58,6 +58,51 @@ pub enum ModalDialog {
     Shortcuts,
 }
 
+/// 画像が属するフォルダ（種類）名ラベルの表示モード
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderLabelMode {
+    /// 画像切替直後とマウスホバー中のみ一時表示
+    Auto,
+    /// 常に表示
+    Always,
+    /// 表示しない
+    Off,
+}
+
+impl FolderLabelMode {
+    pub fn from_config(s: &str) -> Self {
+        match s {
+            "always" => Self::Always,
+            "off" => Self::Off,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn as_config_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::Always,
+            Self::Always => Self::Off,
+            Self::Off => Self::Auto,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "自動（切替時・ホバー時のみ）",
+            Self::Always => "常時表示",
+            Self::Off => "非表示",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BarButtonId {
     Open,
