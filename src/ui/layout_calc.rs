@@ -7,7 +7,7 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::core::*;
 
 use crate::catalog::Catalog;
-use crate::ui::types::{BarButtonId, FrameOverlayButtonId, ViewMode};
+use crate::ui::types::{BarButtonId, ViewMode};
 
 pub fn get_window_dpi(hwnd: HWND) -> u32 {
     unsafe {
@@ -38,15 +38,18 @@ pub struct ModalCardLayout {
 }
 
 pub fn get_shortcuts_modal_layout(win_w: i32, win_h: i32, dpi: u32) -> ModalCardLayout {
-    let box_w = scale_by_dpi(480, dpi);
-    let box_h = scale_by_dpi(680, dpi);
+    let margin = scale_by_dpi(24, dpi);
+    let max_w = (win_w - margin).max(scale_by_dpi(320, dpi));
+    let max_h = (win_h - margin).max(scale_by_dpi(240, dpi));
+    let box_w = scale_by_dpi(940, dpi).min(max_w);
+    let box_h = scale_by_dpi(510, dpi).min(max_h);
     let bx = (win_w - box_w) / 2;
     let by = (win_h - box_h) / 2;
 
     let close_w = scale_by_dpi(120, dpi);
     let close_h = scale_by_dpi(34, dpi);
     let close_x = bx + (box_w - close_w) / 2;
-    let close_y = by + scale_by_dpi(625, dpi);
+    let close_y = by + box_h - close_h - scale_by_dpi(18, dpi);
 
     ModalCardLayout {
         card_rect: RECT {
@@ -220,44 +223,6 @@ pub fn get_operation_bar_buttons(dpi: u32) -> Vec<(BarButtonId, RECT)> {
         current_x += w + gap;
     }
     result
-}
-
-pub fn get_frame_overlay_buttons(
-    fx: i32,
-    fy: i32,
-    fh: i32,
-    dpi: u32,
-) -> [(FrameOverlayButtonId, RECT); 4] {
-    let btn_h = scale_by_dpi(28, dpi);
-    let bottom_margin = scale_by_dpi(36, dpi);
-    let btn_y = fy + fh - bottom_margin;
-    let gap = scale_by_dpi(6, dpi);
-    let start_x = fx + scale_by_dpi(8, dpi);
-
-    let defs = [
-        (FrameOverlayButtonId::Pin, 56),
-        (FrameOverlayButtonId::Swap, 64),
-        (FrameOverlayButtonId::Random, 72),
-        (FrameOverlayButtonId::Exclude, 76),
-    ];
-
-    let mut current_x = start_x;
-    let mut buttons = Vec::with_capacity(4);
-    for (id, base_w) in defs {
-        let w = scale_by_dpi(base_w, dpi);
-        buttons.push((
-            id,
-            RECT {
-                left: current_x,
-                top: btn_y,
-                right: current_x + w,
-                bottom: btn_y + btn_h,
-            },
-        ));
-        current_x += w + gap;
-    }
-
-    [buttons[0], buttons[1], buttons[2], buttons[3]]
 }
 
 pub fn osd_text_display_width(text: &str) -> i32 {

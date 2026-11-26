@@ -1084,44 +1084,6 @@ fn test_acceptance_dpi_scaling_operation_bar() {
 }
 
 #[test]
-fn test_acceptance_dpi_scaling_frame_overlay_buttons() {
-    let fx = 100;
-    let fy = 200;
-    let fh = 400;
-
-    let btns_100 = kabaper::ui::get_frame_overlay_buttons(fx, fy, fh, 96);
-    let btns_150 = kabaper::ui::get_frame_overlay_buttons(fx, fy, fh, 144);
-
-    for (b100, b150) in btns_100.iter().zip(btns_150.iter()) {
-        assert_eq!(b100.0, b150.0);
-        let w100 = b100.1.right - b100.1.left;
-        let w150 = b150.1.right - b150.1.left;
-        let h100 = b100.1.bottom - b100.1.top;
-        let h150 = b150.1.bottom - b150.1.top;
-
-        assert_eq!(h100, 28);
-        assert_eq!(h150, 42); // 28 * 1.5 = 42
-        let expected_w150 = ((w100 as f32) * 1.5).round() as i32;
-        assert!(
-            (w150 - expected_w150).abs() <= 1,
-            "Frame overlay button width {} should scale to approx {} at 150% DPI, got {}",
-            w100,
-            expected_w150,
-            w150
-        );
-    }
-
-    for i in 0..btns_150.len() - 1 {
-        assert!(
-            btns_150[i].1.right < btns_150[i + 1].1.left,
-            "Frame overlay buttons {} and {} should not overlap at 150% DPI",
-            i,
-            i + 1
-        );
-    }
-}
-
-#[test]
 fn test_acceptance_dpi_scaling_empty_and_osd() {
     let btn_100 = kabaper::ui::empty_state_folder_btn_rect_dpi(1920, 1080, 45, 96);
     let btn_150 = kabaper::ui::empty_state_folder_btn_rect_dpi(1920, 1080, 68, 144);
@@ -1471,8 +1433,7 @@ fn test_acceptance_always_on_top_header_toggle_and_persistence() {
     state.toggle_always_on_top();
     assert!(!state.always_on_top, "Toggled state must be false");
     assert!(!state.config.window.always_on_top);
-    assert!(state.osd.is_some());
-    assert!(state.osd.as_ref().unwrap().0.contains("OFF"));
+    assert!(state.osd.is_none(), "Normal UI toggle must not pop up OSD");
 
     // Save config and simulate restart
     assert!(state.storage.save_config(&state.config).is_ok());
@@ -1488,7 +1449,7 @@ fn test_acceptance_always_on_top_header_toggle_and_persistence() {
     state2.toggle_always_on_top();
     assert!(state2.always_on_top);
     assert!(state2.config.window.always_on_top);
-    assert!(state2.osd.as_ref().unwrap().0.contains("ON"));
+    assert!(state2.osd.is_none(), "Normal UI toggle must not pop up OSD");
 
     let _ = fs::remove_dir_all(&temp);
 }

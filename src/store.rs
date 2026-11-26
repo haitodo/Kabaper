@@ -140,10 +140,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_folder_label() -> String {
-    "on_demand".to_string()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowConfig {
@@ -156,9 +152,8 @@ pub struct WindowConfig {
     pub show_info: bool,
     #[serde(default = "default_true")]
     pub always_on_top: bool,
-    /// フォルダ名ラベルの表示モード: "on_demand"（右クリック時のみ） | "always"
-    #[serde(default = "default_folder_label")]
-    pub folder_label: String,
+    /// フォルダ階層ラベルの表示ON/OFF（Fキーで切替）
+    pub show_folder_label: bool,
 }
 
 impl Default for WindowConfig {
@@ -172,7 +167,7 @@ impl Default for WindowConfig {
             fullscreen: false,
             show_info: false,
             always_on_top: true,
-            folder_label: default_folder_label(),
+            show_folder_label: false,
         }
     }
 }

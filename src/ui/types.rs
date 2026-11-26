@@ -58,45 +58,6 @@ pub enum ModalDialog {
     Shortcuts,
 }
 
-/// 画像が属するフォルダ（種類）名ラベルの表示モード
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FolderLabelMode {
-    /// 右クリックメニューを開いている間だけ表示
-    OnDemand,
-    /// 常に表示
-    Always,
-}
-
-impl FolderLabelMode {
-    pub fn from_config(s: &str) -> Self {
-        match s {
-            "always" => Self::Always,
-            _ => Self::OnDemand,
-        }
-    }
-
-    pub fn as_config_str(self) -> &'static str {
-        match self {
-            Self::OnDemand => "on_demand",
-            Self::Always => "always",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            Self::OnDemand => Self::Always,
-            Self::Always => Self::OnDemand,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::OnDemand => "右クリック時のみ",
-            Self::Always => "常時表示",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BarButtonId {
     Open,
@@ -114,14 +75,6 @@ pub enum BarButtonId {
     Settings,
     Shortcuts,
     AlwaysOnTop,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameOverlayButtonId {
-    Pin,
-    Swap,
-    Random,
-    Exclude,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

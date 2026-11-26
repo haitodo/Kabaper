@@ -31,7 +31,7 @@ use crate::smart_pan::calculate_smart_pan;
 use crate::store::{AppConfig, FramePreset, Storage, WallpaperPreset};
 use super::library::{LibraryLoader, LibraryRequest, LoadedLibrary};
 use crate::ui::render::show_monitor_overlays;
-use crate::ui::types::{FolderLabelMode, ModalDialog, SEQ_COUNTER, ViewMode};
+use crate::ui::types::{ModalDialog, SEQ_COUNTER, ViewMode};
 
 pub struct AppState {
     pub storage: Storage,
@@ -92,10 +92,8 @@ pub struct AppState {
     prefetch_active: bool,
     prefetch_paths: Vec<PathBuf>,
     pub latest_prefetch_req: Arc<AtomicU64>,
-    /// フォルダ名ラベルの表示モード
-    pub folder_label_mode: FolderLabelMode,
-    /// 右クリックメニュー表示中など、一時的にフォルダ名ラベルを表示する
-    pub folder_label_peek: bool,
+    /// フォルダ階層ラベルの表示ON/OFF（Fキーで切替）
+    pub show_folder_label: bool,
 }
 
 #[derive(Debug)]
@@ -260,13 +258,12 @@ impl AppState {
             prefetch_active: false,
             prefetch_paths: Vec::new(),
             latest_prefetch_req,
-            folder_label_mode: FolderLabelMode::OnDemand,
-            folder_label_peek: false,
+            show_folder_label: false,
         };
 
         state.show_info = state.config.window.show_info;
         state.always_on_top = state.config.window.always_on_top;
-        state.folder_label_mode = FolderLabelMode::from_config(&state.config.window.folder_label);
+        state.show_folder_label = state.config.window.show_folder_label;
 
         if let Some(err) = state.error_banner.first() {
             state.set_osd(err.clone(), 5, false);
@@ -338,17 +335,11 @@ impl AppState {
 
     // ---- フォルダ（種類）名ラベル ----
 
-    /// 表示モードを 右クリック時のみ ⇄ 常時表示 で切り替える
-    pub fn cycle_folder_label_mode(&mut self) {
-        self.folder_label_mode = self.folder_label_mode.next();
-        self.config.window.folder_label = self.folder_label_mode.as_config_str().to_string();
+    /// フォルダ階層ラベルの表示をON/OFFで切り替える
+    pub fn toggle_folder_label(&mut self) {
+        self.show_folder_label = !self.show_folder_label;
+        self.config.window.show_folder_label = self.show_folder_label;
         self.mark_config_dirty();
-        self.set_osd(format!("フォルダ名表示: {}", self.folder_label_mode.label()), 2, false);
-    }
-
-    /// フォルダ名ラベルを表示すべきか（常時表示モード、または右クリックメニュー表示中）
-    pub fn is_folder_label_visible(&self) -> bool {
-        self.folder_label_mode == FolderLabelMode::Always || self.folder_label_peek
     }
 
     pub fn has_pinned_frames(&self) -> bool {
@@ -1070,9 +1061,6 @@ impl AppState {
                 } else {
                     self.ensure_current_image_loaded();
                 }
-                if let Some(item) = self.catalog.current_item() {
-                    self.set_osd(format!("ランダム: {}", item.filename), 2, false);
-                }
             } else {
                 self.set_osd("候補画像がありません".to_string(), 2, false);
             }
@@ -1121,17 +1109,8 @@ impl AppState {
                         }
                     }
                     self.rebuild_layout(false, false);
-                    let filename = next_path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("");
-                    self.set_osd(
-                        format!("枠{} ランダム: {}", self.selected_frame_idx + 1, filename),
-                        2,
-                        false,
-                    );
                 } else {
-                    self.set_osd("画像の読み込みに失敗しました".to_string(), 2, true);
+                    self.set_osd("画像の読み込みに失敗しました".to_string(), 3, false);
                 }
             } else {
                 self.set_osd("変更可能な別候補がありません".to_string(), 2, false);
@@ -1159,7 +1138,6 @@ impl AppState {
             }
         }
 
-        let total_frames = self.layout_frames.len();
         let unpinned_indices: Vec<usize> = self
             .layout_frames
             .iter()
@@ -1226,18 +1204,8 @@ impl AppState {
 
         if changed_count > 0 {
             self.rebuild_layout(false, false);
-            let pinned_count = total_frames - unpinned_indices.len();
-            if pinned_count > 0 {
-                self.set_osd(
-                    format!("全枠ランダム変更 ({}枠固定)", pinned_count),
-                    2,
-                    false,
-                );
-            } else {
-                self.set_osd("全枠の画像をランダム変更".to_string(), 2, false);
-            }
         } else if load_error {
-            self.set_osd("画像の読み込みに失敗しました".to_string(), 2, true);
+            self.set_osd("画像の読み込みに失敗しました".to_string(), 3, false);
         } else {
             self.set_osd("変更可能な候補画像がありません".to_string(), 2, false);
         }
@@ -1249,7 +1217,6 @@ impl AppState {
         self.reset_normal_zoom();
         if self.view_mode == ViewMode::Normal {
             self.view_mode = ViewMode::Composite;
-            self.set_osd("合成表示".into(), 2, false);
             self.rebuild_layout(false, false);
         } else {
             self.view_mode = ViewMode::Normal;
@@ -1259,7 +1226,6 @@ impl AppState {
                 self.catalog.select_by_path(Path::new(&img.id.0));
             }
             self.ensure_current_image_loaded();
-            self.set_osd("通常表示".into(), 2, false);
         }
     }
 
@@ -1267,15 +1233,6 @@ impl AppState {
         if self.selected_frame_idx < self.layout_frames.len() {
             let is_pinned = !self.layout_frames[self.selected_frame_idx].pinned;
             self.layout_frames[self.selected_frame_idx].pinned = is_pinned;
-            self.set_osd(
-                if is_pinned {
-                    "ピン留めしました".into()
-                } else {
-                    "ピン留めを解除しました".into()
-                },
-                2,
-                false,
-            );
             self.rebuild_layout(false, false);
         }
     }
@@ -1288,14 +1245,12 @@ impl AppState {
         let next_idx = (self.selected_frame_idx + 1) % len;
         self.layout_frames.swap(self.selected_frame_idx, next_idx);
         self.selected_frame_idx = next_idx;
-        self.set_osd("枠を交換しました".into(), 2, false);
         self.rebuild_layout(false, false);
         self.ensure_current_item_visible_in_sidebar();
     }
 
     pub fn reset_pan(&mut self) {
         if self.selected_frame_idx < self.layout_frames.len() {
-            self.set_osd("パン位置を中央にリセットしました".into(), 2, false);
             self.update_pan_fast(self.selected_frame_idx, (0.5, 0.5));
         }
     }
@@ -1311,13 +1266,10 @@ impl AppState {
         self.normal_zoom = new_zoom;
         if new_zoom <= 1.0 {
             self.normal_pan_offset = (0.0, 0.0);
-            self.set_osd("ズーム: 全体表示 (Fit)".into(), 1, false);
         } else {
             let scale_change = new_zoom / old_zoom;
             self.normal_pan_offset.0 *= scale_change;
             self.normal_pan_offset.1 *= scale_change;
-            let percent = (self.normal_zoom * 100.0).round() as i32;
-            self.set_osd(format!("ズーム: {}%", percent), 1, false);
         }
     }
 
@@ -1332,11 +1284,9 @@ impl AppState {
                     let target_zoom = 1.0 / fit_scale;
                     if (self.normal_zoom - target_zoom).abs() < 0.05 {
                         self.reset_normal_zoom();
-                        self.set_osd("ズーム: 全体表示 (Fit)".into(), 1, false);
                     } else {
                         self.normal_zoom = target_zoom.clamp(1.0, 10.0);
                         self.normal_pan_offset = (0.0, 0.0);
-                        self.set_osd("ズーム: 100% (等倍)".into(), 1, false);
                     }
                 }
             }
@@ -1353,8 +1303,6 @@ impl AppState {
         };
         self.config.layout.dim_ratio = next_dim;
         self.mark_config_dirty();
-        let pct = (next_dim * 100.0).round() as i32;
-        self.set_osd(format!("背景ぼかし減光: {}%", pct), 2, false);
         self.rebuild_layout(false, false);
     }
 
@@ -1425,16 +1373,6 @@ impl AppState {
 
         self.view_mode = ViewMode::Composite;
         self.rebuild_layout(false, false);
-        self.set_osd(
-            format!(
-                "プリセット適用: {} ({}/{})",
-                preset.name,
-                idx + 1,
-                self.config.presets.len()
-            ),
-            3,
-            false,
-        );
     }
 
     pub fn apply_smart_pan_current_frame(&mut self) {
@@ -1462,14 +1400,6 @@ impl AppState {
                 let slot = frame_plan.slot;
                 let (pan_x, pan_y) = calculate_smart_pan(dec, slot.width, slot.height, content.scale);
                 self.update_pan_fast(self.selected_frame_idx, (pan_x, pan_y));
-                self.set_osd(
-                    format!(
-                        "スマートパン: 枠{}を被写体・顔に自動調整しました",
-                        self.selected_frame_idx + 1
-                    ),
-                    2,
-                    false,
-                );
             }
         }
     }
@@ -1503,13 +1433,7 @@ impl AppState {
                 use std::os::windows::process::CommandExt;
                 let arg = format!("/select,\"{}\"", norm_path.to_string_lossy());
                 if let Err(e) = std::process::Command::new("explorer").raw_arg(arg).spawn() {
-                    self.set_osd(format!("エクスプローラーの起動に失敗しました: {e}"), 3, true);
-                } else {
-                    let fname = norm_path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    self.set_osd(format!("ファイルの場所を開きました: {fname}"), 2, false);
+                    self.set_osd(format!("エクスプローラーの起動に失敗しました: {e}"), 3, false);
                 }
                 return;
             }
@@ -1521,33 +1445,21 @@ impl AppState {
                 use std::os::windows::process::CommandExt;
                 let arg = format!("\"{}\"", norm_folder.to_string_lossy());
                 if let Err(e) = std::process::Command::new("explorer").raw_arg(arg).spawn() {
-                    self.set_osd(format!("エクスプローラーの起動に失敗しました: {e}"), 3, true);
-                } else {
-                    self.set_osd(format!("フォルダを開きました: {}", norm_folder.display()), 2, false);
+                    self.set_osd(format!("エクスプローラーの起動に失敗しました: {e}"), 3, false);
                 }
                 return;
             }
         }
 
-        self.set_osd("開く画像またはフォルダがありません".into(), 2, true);
+        self.set_osd("開く画像またはフォルダがありません".into(), 2, false);
     }
 
     pub fn toggle_exclude_current(&mut self) {
         let path = self.current_selected_image_path();
 
         if let Some(p) = path {
-            let is_now_excluded = self.catalog.toggle_exclude(&p);
+            self.catalog.toggle_exclude(&p);
             self.sync_catalog_excludes();
-
-            self.set_osd(
-                if is_now_excluded {
-                    "画像を除外しました (Delで解除)".into()
-                } else {
-                    "画像の除外を解除しました".into()
-                },
-                3,
-                false,
-            );
             self.rebuild_layout(false, false);
         }
     }
@@ -1591,8 +1503,6 @@ impl AppState {
                 3,
                 false,
             );
-        } else {
-            self.set_osd(format!("分割モード: {}", mode_name), 2, false);
         }
     }
 
@@ -1600,11 +1510,6 @@ impl AppState {
         let new_scale = ((self.config.layout.max_scale + delta) * 20.0).round() / 20.0;
         self.config.layout.max_scale = new_scale.clamp(1.00, 2.50);
         self.mark_config_dirty();
-        self.set_osd(
-            format!("最大拡大率 M: {:.2}", self.config.layout.max_scale),
-            2,
-            false,
-        );
         self.rebuild_layout(false, true);
     }
 
@@ -1614,11 +1519,6 @@ impl AppState {
             self.config.target.monitor_id = Some(self.monitors[idx].id.clone());
             self.mark_config_dirty();
             self.view_mode = ViewMode::Composite;
-            self.set_osd(
-                format!("モニター #{}: {}", number, self.monitors[idx].name),
-                2,
-                false,
-            );
             self.rebuild_layout(false, true);
             show_monitor_overlays(&self.monitors);
         } else {
@@ -2012,15 +1912,6 @@ impl AppState {
                 let _ = InvalidateRect(Some(self.hwnd), None, false);
             }
         }
-
-        self.set_osd(
-            format!(
-                "最前面表示: {}",
-                if self.always_on_top { "ON" } else { "OFF" }
-            ),
-            2,
-            false,
-        );
     }
 
     pub fn toggle_sidebar(&mut self) {
@@ -2028,18 +1919,6 @@ impl AppState {
         if self.show_sidebar {
             self.ensure_current_item_visible_in_sidebar();
         }
-        self.set_osd(
-            format!(
-                "サイドバー: {}",
-                if self.show_sidebar {
-                    "表示"
-                } else {
-                    "非表示"
-                }
-            ),
-            2,
-            false,
-        );
     }
 
     pub fn toggle_folder_collapse(&mut self, folder: &Path) {
@@ -2193,15 +2072,6 @@ impl AppState {
                 self.catalog.select_by_path(&next_path);
             }
             self.rebuild_layout(false, false);
-            let frame_label = if self.layout_frames.len() == 2 {
-                if frame_idx == 0 { "左枠" } else { "右枠" }
-            } else if self.layout_frames.len() == 3 {
-                if frame_idx == 0 { "左枠" } else if frame_idx == 1 { "中枠" } else { "右枠" }
-            } else {
-                "指定枠"
-            };
-            let fname = next_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            self.set_osd(format!("{}: {}", frame_label, fname), 2, false);
         }
         self.ensure_current_item_visible_in_sidebar();
     }
@@ -2284,7 +2154,6 @@ impl AppState {
         self.sidebar_target_scroll_offset = 0.0;
         self.sidebar_scroll_offset_f = 0.0;
         self.sidebar_scroll_animating = false;
-        self.set_osd("全フォルダを折りたたみました".into(), 2, false);
     }
 
     pub fn focus_current_folder(&mut self) {
@@ -2298,8 +2167,6 @@ impl AppState {
             && let Some(parent) = item.path.parent()
         {
             self.collapsed_folders.remove(parent);
-            let name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            self.set_osd(format!("フォルダに集中: {}", name), 2, false);
         }
         self.ensure_current_item_visible_in_sidebar();
     }
@@ -2361,13 +2228,6 @@ impl AppState {
 
         if let Some(idx) = target {
             self.select_image_by_index(idx);
-            let folder_name = self.catalog.items[idx]
-                .path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("ルート");
-            self.set_osd(format!("次のフォルダへ: {}", folder_name), 2, false);
         }
     }
 
@@ -2414,13 +2274,6 @@ impl AppState {
             }
 
             self.select_image_by_index(start_idx);
-            let folder_name = self.catalog.items[start_idx]
-                .path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("ルート");
-            self.set_osd(format!("前のフォルダへ: {}", folder_name), 2, false);
         }
     }
 }

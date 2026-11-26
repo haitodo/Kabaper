@@ -226,40 +226,27 @@ mod tests {
     }
 
     #[test]
-    fn test_folder_label_mode_cycle_and_config_roundtrip() {
-        let m = FolderLabelMode::OnDemand;
-        assert_eq!(m.next(), FolderLabelMode::Always);
-        assert_eq!(m.next().next(), FolderLabelMode::OnDemand);
-        for mode in [FolderLabelMode::OnDemand, FolderLabelMode::Always] {
-            assert_eq!(FolderLabelMode::from_config(mode.as_config_str()), mode);
-        }
-        // 旧設定値・不明値は右クリック時のみ
-        assert_eq!(FolderLabelMode::from_config("auto"), FolderLabelMode::OnDemand);
-        assert_eq!(FolderLabelMode::from_config("off"), FolderLabelMode::OnDemand);
-    }
-
-    #[test]
-    fn test_folder_label_visible_only_on_demand() {
+    fn test_folder_label_toggle_and_persistence() {
         let temp = std::env::temp_dir().join(format!("kabaper_test_folder_label_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         std::fs::create_dir_all(&temp).unwrap();
-        let storage = crate::store::Storage::init_with_dir(temp.join("storage")).unwrap();
+        let storage_dir = temp.join("storage");
+        let storage = crate::store::Storage::init_with_dir(storage_dir.clone()).unwrap();
         let mut state = AppState::new(storage, crate::store::AppConfig::default(), None).unwrap();
 
-        // 既定は右クリック時のみ: 通常は非表示
-        assert_eq!(state.folder_label_mode, FolderLabelMode::OnDemand);
-        assert!(!state.is_folder_label_visible());
-        // 右クリックメニュー表示中のみ表示
-        state.folder_label_peek = true;
-        assert!(state.is_folder_label_visible());
-        state.folder_label_peek = false;
-        assert!(!state.is_folder_label_visible());
+        // 既定は非表示、Fキー切替でも不要なOSDは出さない
+        assert!(!state.show_folder_label);
+        state.toggle_folder_label();
+        assert!(state.show_folder_label);
+        assert!(state.config.window.show_folder_label);
+        assert!(state.osd.is_none());
 
-        // F で常時表示へ切替、設定にも保存される
-        state.cycle_folder_label_mode();
-        assert_eq!(state.folder_label_mode, FolderLabelMode::Always);
-        assert_eq!(state.config.window.folder_label, "always");
-        assert!(state.is_folder_label_visible());
+        assert!(state.storage.save_config(&state.config).is_ok());
+        let mut storage2 = crate::store::Storage::init_with_dir(storage_dir).unwrap();
+        let (reloaded_cfg, _) = storage2.load_config();
+        assert!(reloaded_cfg.window.show_folder_label);
+        let state2 = AppState::new(storage2, reloaded_cfg, None).unwrap();
+        assert!(state2.show_folder_label);
 
         let _ = std::fs::remove_dir_all(&temp);
     }
@@ -303,11 +290,11 @@ mod tests {
         let card = layout.card_rect;
         let close_btn = layout.close_btn_rect;
 
-        // Card dimensions (480 x 680 at 96 dpi)
-        assert_eq!(card.right - card.left, 480);
-        assert_eq!(card.bottom - card.top, 680);
-        assert_eq!(card.left, (win_w - 480) / 2);
-        assert_eq!(card.top, (win_h - 680) / 2);
+        // Card dimensions (940 x 510 at 96 dpi for 2-column layout)
+        assert_eq!(card.right - card.left, 940);
+        assert_eq!(card.bottom - card.top, 510);
+        assert_eq!(card.left, (win_w - 940) / 2);
+        assert_eq!(card.top, (win_h - 510) / 2);
 
         // Close button must be completely inside the card bounds
         assert!(close_btn.left >= card.left);
@@ -318,6 +305,15 @@ mod tests {
         // Close button dimensions (120 x 34 at 96 dpi)
         assert_eq!(close_btn.right - close_btn.left, 120);
         assert_eq!(close_btn.bottom - close_btn.top, 34);
+
+        // Small / high-DPI window: card and close button must still fit inside window
+        let small = get_shortcuts_modal_layout(800, 600, 144);
+        assert!(small.card_rect.left >= 0);
+        assert!(small.card_rect.top >= 0);
+        assert!(small.card_rect.right <= 800);
+        assert!(small.card_rect.bottom <= 600);
+        assert!(small.close_btn_rect.top >= small.card_rect.top);
+        assert!(small.close_btn_rect.bottom <= small.card_rect.bottom);
 
         // Center of close button must hit
         let cx = (close_btn.left + close_btn.right) / 2;

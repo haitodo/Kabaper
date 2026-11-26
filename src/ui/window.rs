@@ -229,6 +229,7 @@ pub fn run_gui(mut state: AppState, class_name: &str) -> Result<()> {
         state.config.window.fullscreen = state.fullscreen;
         state.config.window.show_info = state.show_info;
         state.config.window.always_on_top = state.always_on_top;
+        state.config.window.show_folder_label = state.show_folder_label;
         if let Some(item) = state.catalog.current_item() {
             state.config.library.last_image = Some(item.path.to_string_lossy().to_string());
         }
@@ -612,7 +613,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
 
-                // Handle frame selection, buttons, and pan in composite mode
+                // Handle frame selection and pan in composite mode
                 if state.view_mode == ViewMode::Composite
                     && let Some(plan) = &state.active_plan
                 {
@@ -626,45 +627,6 @@ unsafe extern "system" fn wnd_proc(
                         state.show_filmstrip,
                         dpi,
                     );
-                    let canvas_w = canvas_layout.w;
-                    let canvas_h = canvas_layout.h;
-
-                    let (mw, mh) = plan.monitor_px;
-                    let fit_scale = (canvas_w as f64 / mw as f64).min(canvas_h as f64 / mh as f64);
-                    let dw = mw as f64 * fit_scale;
-                    let dh = mh as f64 * fit_scale;
-                    let ox = canvas_layout.x as f64 + (canvas_w as f64 - dw) / 2.0;
-                    let oy = canvas_layout.y as f64 + (canvas_h as f64 - dh) / 2.0;
-
-                    // Check frame overlay buttons on selected frame
-                    let clicked_btn = if let Some(sel_frame) = plan.frames.get(state.selected_frame_idx) {
-                        let fx = (ox + sel_frame.slot.x as f64 * fit_scale).round() as i32;
-                        let fy = (oy + sel_frame.slot.y as f64 * fit_scale).round() as i32;
-                        let fh = (sel_frame.slot.height as f64 * fit_scale).round() as i32;
-
-                        let overlay_buttons = get_frame_overlay_buttons(fx, fy, fh, dpi);
-                        let mut found = None;
-                        for (btn_id, r) in overlay_buttons {
-                            if x >= r.left && x <= r.right && y >= r.top && y <= r.bottom {
-                                found = Some(btn_id);
-                                break;
-                            }
-                        }
-                        found
-                    } else {
-                        None
-                    };
-
-                    if let Some(btn_id) = clicked_btn {
-                        match btn_id {
-                            FrameOverlayButtonId::Pin => state.toggle_pin(),
-                            FrameOverlayButtonId::Swap => state.swap_frames(),
-                            FrameOverlayButtonId::Random => state.random_image(),
-                            FrameOverlayButtonId::Exclude => state.toggle_exclude_current(),
-                        }
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                        return LRESULT(0);
-                    }
 
                     if let Some(i) = composite_frame_index_at(plan, canvas_layout, x, y) {
                         state.selected_frame_idx = i;
@@ -1016,7 +978,6 @@ unsafe extern "system" fn wnd_proc(
                             state.reset_pan();
                         } else {
                             state.reset_normal_zoom();
-                            state.set_osd("ズーム: 全体表示 (Fit)".into(), 1, false);
                         }
                     }
                     VK_V => state.switch_view_mode(),
@@ -1038,7 +999,6 @@ unsafe extern "system" fn wnd_proc(
                     VK_NUMPAD0 => {
                         if state.view_mode == ViewMode::Normal {
                             state.reset_normal_zoom();
-                            state.set_osd("ズーム: 全体表示 (Fit)".into(), 1, false);
                         }
                     }
                     VK_RETURN => {
@@ -1089,22 +1049,10 @@ unsafe extern "system" fn wnd_proc(
                     VK_D => state.cycle_dim_ratio(),
                     VK_A => state.apply_smart_pan_current_frame(),
                     VK_B => state.toggle_sidebar(),
-                    // F: フォルダ（種類）名ラベルの表示モード切替
-                    VK_F if !ctrl && !alt => state.cycle_folder_label_mode(),
+                    // F: フォルダ階層ラベルの表示ON/OFF切替
+                    VK_F if !ctrl && !alt => state.toggle_folder_label(),
                     VK_T => {
                         state.show_filmstrip = !state.show_filmstrip;
-                        state.set_osd(
-                            format!(
-                                "フィルムストリップ: {}",
-                                if state.show_filmstrip {
-                                    "表示"
-                                } else {
-                                    "非表示"
-                                }
-                            ),
-                            2,
-                            false,
-                        );
                     }
                     VK_P => {
                         if ctrl {
@@ -1128,11 +1076,6 @@ unsafe extern "system" fn wnd_proc(
                         state.show_info = !state.show_info;
                         state.config.window.show_info = state.show_info;
                         state.mark_config_dirty();
-                        state.set_osd(
-                            format!("情報表示: {}", if state.show_info { "ON" } else { "OFF" }),
-                            2,
-                            false,
-                        );
                     }
                     VK_F11 => state.toggle_fullscreen(),
                     VK_F1 | VK_OEM_2 => {
@@ -1660,7 +1603,6 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32, dpi: u32
                     }
                     state.sync_catalog_excludes();
                     state.rebuild_layout(false, false);
-                    state.set_osd("現在のフォルダの除外を一括解除しました".into(), 2, false);
                 }
 
                 // Clean nonexistent paths
@@ -1671,7 +1613,6 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32, dpi: u32
                 if y >= clr2_y && y <= clr2_y + clr2_h && x >= clr2_x && x <= clr2_x + clr2_w {
                     state.catalog.excluded_paths.retain(|p| p.exists());
                     state.sync_catalog_excludes();
-                    state.set_osd("存在しないパスの除外設定を整理しました".into(), 2, false);
                 }
 
                 // Clear other folder excludes
@@ -1691,7 +1632,6 @@ fn handle_modal_click(state: &mut AppState, hwnd: HWND, x: i32, y: i32, dpi: u32
                         .excluded_paths
                         .retain(|p| p.parent().map(normalize_path).as_ref() == Some(&f_norm));
                     state.sync_catalog_excludes();
-                    state.set_osd("他フォルダの除外設定を一括解除しました".into(), 2, false);
                 }
             }
             ModalDialog::Shortcuts => {
@@ -1910,6 +1850,31 @@ fn show_context_menu(state: &mut AppState, hwnd: HWND, lparam: LPARAM) {
             }
         }
 
+        // 合成表示では右クリックした位置の枠を選択してからメニューを開く
+        if state.view_mode == ViewMode::Composite {
+            let dpi = get_window_dpi(hwnd);
+            let bar_h = if state.bar_visible { get_bar_height(dpi) } else { 0 };
+            let mut cr = RECT::default();
+            let _ = GetClientRect(hwnd, &mut cr);
+            let canvas = get_canvas_layout(
+                cr.right,
+                cr.bottom,
+                bar_h,
+                state.show_sidebar,
+                state.show_filmstrip,
+                dpi,
+            );
+            if let Some(i) = state
+                .active_plan
+                .as_ref()
+                .and_then(|plan| composite_frame_index_at(plan, canvas, x, y))
+                && i < state.layout_frames.len()
+            {
+                state.selected_frame_idx = i;
+                state.ensure_current_item_visible_in_sidebar();
+            }
+        }
+
         show_context_menu_at(state, hwnd, pt.x, pt.y);
     }
 }
@@ -1982,17 +1947,8 @@ fn show_sidebar_context_menu(
                 3012 => {
                     if let Some(item) = state.catalog.items.get(target_catalog_idx) {
                         let p = item.path.clone();
-                        let is_now_excluded = state.catalog.toggle_exclude(&p);
+                        state.catalog.toggle_exclude(&p);
                         state.sync_catalog_excludes();
-                        state.set_osd(
-                            if is_now_excluded {
-                                "画像を除外しました".into()
-                            } else {
-                                "画像の除外を解除しました".into()
-                            },
-                            2,
-                            false,
-                        );
                         state.rebuild_layout(false, false);
                     }
                 }
@@ -2036,20 +1992,54 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
             w!("全枠の画像をランダム入替 (Q / マウス側面ボタン)"),
         );
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
+        if state.view_mode == ViewMode::Composite {
+            let is_pinned = state
+                .layout_frames
+                .get(state.selected_frame_idx)
+                .is_some_and(|f| f.pinned);
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                1014,
+                if is_pinned {
+                    w!("この枠のピン留めを解除 (Space)")
+                } else {
+                    w!("この枠をピン留め (Space)")
+                },
+            );
+            if state.layout_frames.len() >= 2 {
+                let _ = AppendMenuW(menu, MF_STRING, 1015, w!("枠を交換 (Shift+Space)"));
+            }
+        }
+        let is_excluded = state
+            .current_selected_image_path()
+            .is_some_and(|p| state.catalog.excluded_paths.contains(&p));
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            1016,
+            if is_excluded {
+                w!("この画像の除外を解除 (Del)")
+            } else {
+                w!("この画像を除外 (Del)")
+            },
+        );
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
         let _ = AppendMenuW(menu, MF_STRING, 1007, w!("スマートパン (被写体/顔自動合わせ: A)"));
         let _ = AppendMenuW(menu, MF_STRING, 1008, w!("フィルムストリップ表示切替 (T)"));
-        let _ = AppendMenuW(menu, MF_STRING, 1013, w!("フォルダ名の常時表示 切替 (F)"));
+        let folder_label_flags = MF_STRING
+            | if state.show_folder_label {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
+        let _ = AppendMenuW(menu, folder_label_flags, 1013, w!("フォルダ階層表示 (F)"));
         let _ = AppendMenuW(menu, MF_STRING, 1009, w!("壁紙プリセット切替 (P)"));
         let _ = AppendMenuW(menu, MF_STRING, 1010, w!("現在の構成をプリセット保存 (Ctrl+P)"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
         let _ = AppendMenuW(menu, MF_STRING, 1003, w!("除外一覧"));
         let _ = AppendMenuW(menu, MF_STRING, 1004, w!("設定"));
         let _ = AppendMenuW(menu, MF_STRING, 1005, w!("操作一覧 (F1)"));
-
-        // メニューを開いている間だけフォルダ名ラベルを表示する
-        state.folder_label_peek = true;
-        let _ = InvalidateRect(Some(hwnd), None, false);
-        let _ = UpdateWindow(hwnd);
 
         let _ = SetForegroundWindow(hwnd);
         let cmd = TrackPopupMenu(
@@ -2063,9 +2053,6 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
         );
         let _ = DestroyMenu(menu);
 
-        state.folder_label_peek = false;
-        let _ = InvalidateRect(Some(hwnd), None, false);
-
         match cmd.0 as u32 {
             1011 => state.open_in_explorer(),
             1001 => state.open_folder_dialog(),
@@ -2074,7 +2061,10 @@ fn show_context_menu_at(state: &mut AppState, hwnd: HWND, screen_x: i32, screen_
             }
             1006 => state.random_image(),
             1012 => state.random_all_images(),
-            1013 => state.cycle_folder_label_mode(),
+            1013 => state.toggle_folder_label(),
+            1014 => state.toggle_pin(),
+            1015 => state.swap_frames(),
+            1016 => state.toggle_exclude_current(),
             1007 => state.apply_smart_pan_current_frame(),
             1008 => {
                 state.show_filmstrip = !state.show_filmstrip;

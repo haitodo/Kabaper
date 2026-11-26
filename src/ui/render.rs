@@ -246,55 +246,26 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
 
                 // Render Frame Overlays
                 if let Some(plan) = &state.active_plan {
+                    let info_r = if state.show_info {
+                        Some(info_overlay_rect(win_h, dpi))
+                    } else {
+                        None
+                    };
                     for (i, frame) in plan.frames.iter().enumerate() {
                         let fx = ox + (frame.slot.x as f64 * fit_scale).round() as i32;
                         let fy = oy + (frame.slot.y as f64 * fit_scale).round() as i32;
                         let fw = (frame.slot.width as f64 * fit_scale).round() as i32;
                         let fh = (frame.slot.height as f64 * fit_scale).round() as i32;
 
-                        if i == state.selected_frame_idx {
-                            let select_brush = CreateSolidBrush(COLORREF(0x00FF9933)); // Accent border
+                        // 選択枠の枠線は複数枠のときのみ控えめに表示
+                        if plan.frames.len() > 1 && i == state.selected_frame_idx {
                             let frame_r = RECT {
                                 left: fx,
                                 top: fy,
                                 right: fx + fw,
                                 bottom: fy + fh,
                             };
-                            let _ = FrameRect(mem_dc, &frame_r, select_brush);
-                            let _ = DeleteObject(select_brush.into());
-
-                            // Spec 4.1: Frame action buttons (ピン, 枠交換, ランダム, 除外)
-                            let overlay_buttons = get_frame_overlay_buttons(fx, fy, fh, dpi);
-                            for (btn_id, r) in overlay_buttons {
-                                let w = r.right - r.left;
-                                let h = r.bottom - r.top;
-                                match btn_id {
-                                    FrameOverlayButtonId::Pin => {
-                                        let pin_txt = if frame.pinned { "解除" } else { "ピン" };
-                                        draw_overlay_btn(mem_dc, r.left, r.top, w, h, pin_txt);
-                                    }
-                                    FrameOverlayButtonId::Swap => {
-                                        draw_overlay_btn(mem_dc, r.left, r.top, w, h, "枠交換");
-                                    }
-                                    FrameOverlayButtonId::Random => {
-                                        draw_overlay_btn(mem_dc, r.left, r.top, w, h, "ランダム");
-                                    }
-                                    FrameOverlayButtonId::Exclude => {
-                                        let ex_txt = if let Some(c) = &frame.content {
-                                            if state.catalog.items.iter().any(|it| {
-                                                it.path.to_string_lossy() == c.id.0 && it.is_excluded
-                                            }) {
-                                                "除外解除"
-                                            } else {
-                                                "除外"
-                                            }
-                                        } else {
-                                            "除外"
-                                        };
-                                        draw_overlay_btn(mem_dc, r.left, r.top, w, h, ex_txt);
-                                    }
-                                }
-                            }
+                            draw_alpha_frame_rect(mem_dc, &frame_r, M3_AMBER_BADGE, 72);
                         }
 
                         let mut badge_y = fy + scale_by_dpi(8, dpi);
@@ -311,30 +282,33 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                             badge_y += badge_step;
                         }
                         if let Some(c) = &frame.content {
-                            match c.scale_limited {
-                                ScaleLimit::MaxScale => {
-                                    draw_badge(
-                                        mem_dc,
-                                        fx + scale_by_dpi(8, dpi),
-                                        badge_y,
-                                        "倍率上限",
-                                        COLORREF(0x0000A5FF),
-                                        dpi,
-                                    );
-                                    badge_y += badge_step;
+                            // 倍率上限・切抜上限は情報表示（Iキー）ON時のみ表示
+                            if state.show_info {
+                                match c.scale_limited {
+                                    ScaleLimit::MaxScale => {
+                                        draw_badge(
+                                            mem_dc,
+                                            fx + scale_by_dpi(8, dpi),
+                                            badge_y,
+                                            "倍率上限",
+                                            COLORREF(0x0000A5FF),
+                                            dpi,
+                                        );
+                                        badge_y += badge_step;
+                                    }
+                                    ScaleLimit::CropLimit => {
+                                        draw_badge(
+                                            mem_dc,
+                                            fx + scale_by_dpi(8, dpi),
+                                            badge_y,
+                                            "切抜上限",
+                                            COLORREF(0x007820D9),
+                                            dpi,
+                                        );
+                                        badge_y += badge_step;
+                                    }
+                                    ScaleLimit::None => {}
                                 }
-                                ScaleLimit::CropLimit => {
-                                    draw_badge(
-                                        mem_dc,
-                                        fx + scale_by_dpi(8, dpi),
-                                        badge_y,
-                                        "切抜上限",
-                                        COLORREF(0x007820D9),
-                                        dpi,
-                                    );
-                                    badge_y += badge_step;
-                                }
-                                ScaleLimit::None => {}
                             }
                             if state.catalog.excluded_paths.contains(std::path::Path::new(&c.id.0))
                             {
@@ -346,11 +320,10 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                                     COLORREF(0x003333FF),
                                     dpi,
                                 );
-                                badge_y += badge_step;
                             }
 
-                            // フォルダ（種類）名ラベル: 枠の左上（状態バッジがあればその下）
-                            if state.is_folder_label_visible() {
+                            // フォルダ階層ラベル: FキーON時に枠の左下へ表示
+                            if state.show_folder_label {
                                 let segments = state
                                     .catalog
                                     .folder_label_segments(std::path::Path::new(&c.id.0));
@@ -360,7 +333,7 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                                     right: fx + fw,
                                     bottom: fy + fh,
                                 };
-                                draw_folder_label(mem_dc, &segments, &frame_r, badge_y, dpi);
+                                draw_folder_label(mem_dc, &segments, &frame_r, info_r, dpi);
                             }
                         } else {
                             draw_badge(
@@ -435,17 +408,21 @@ pub(crate) fn paint_window(state: &mut AppState, hwnd: HWND, hdc: HDC) {
                     );
                     let _ = SelectClipRgn(mem_dc, None);
 
-                    // フォルダ（種類）名ラベル: 表示中の画像の左上
-                    if state.is_folder_label_visible() {
+                    // フォルダ階層ラベル: FキーON時に表示中の画像の左下へ表示
+                    if state.show_folder_label {
                         let visible_r = RECT {
                             left: ox.max(canvas_x),
                             top: oy.max(canvas_y),
                             right: (ox + dw).min(canvas_x + canvas_w),
                             bottom: (oy + dh).min(canvas_y + canvas_h),
                         };
+                        let info_r = if state.show_info {
+                            Some(info_overlay_rect(win_h, dpi))
+                        } else {
+                            None
+                        };
                         let segments = state.catalog.folder_label_segments(&item.path);
-                        let label_top = visible_r.top + scale_by_dpi(8, dpi);
-                        draw_folder_label(mem_dc, &segments, &visible_r, label_top, dpi);
+                        draw_folder_label(mem_dc, &segments, &visible_r, info_r, dpi);
                     }
                 } else if let Some(reason) = &item.failure_reason {
                     let mut rect = RECT {
@@ -852,24 +829,22 @@ unsafe fn fill_alpha_rect(hdc: HDC, rect: &RECT, color: COLORREF, alpha: u8) {
     });
 }
 
-fn draw_overlay_btn(hdc: HDC, x: i32, y: i32, w: i32, h: i32, text: &str) {
+/// 矩形の外周を半透明の1px枠線で描画する（角の二重合成を避ける）。
+unsafe fn draw_alpha_frame_rect(hdc: HDC, rect: &RECT, color: COLORREF, alpha: u8) {
+    let w = rect.right - rect.left;
+    let h = rect.bottom - rect.top;
+    if w <= 1 || h <= 1 {
+        return;
+    }
     unsafe {
-        let r = RECT {
-            left: x,
-            top: y,
-            right: x + w,
-            bottom: y + h,
-        };
-        fill_alpha_rect(hdc, &r, M3_SURFACE_HIGH, 210);
-
-        let border_brush = CreateSolidBrush(M3_OUTLINE);
-        let _ = FrameRect(hdc, &r, border_brush);
-        let _ = DeleteObject(border_brush.into());
-
-        let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, M3_TEXT_PRIMARY);
-        let mut tr = r;
-        draw_text(hdc, text, &mut tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        let top = RECT { left: rect.left, top: rect.top, right: rect.right, bottom: rect.top + 1 };
+        let bottom = RECT { left: rect.left, top: rect.bottom - 1, right: rect.right, bottom: rect.bottom };
+        let left = RECT { left: rect.left, top: rect.top + 1, right: rect.left + 1, bottom: rect.bottom - 1 };
+        let right = RECT { left: rect.right - 1, top: rect.top + 1, right: rect.right, bottom: rect.bottom - 1 };
+        fill_alpha_rect(hdc, &top, color, alpha);
+        fill_alpha_rect(hdc, &bottom, color, alpha);
+        fill_alpha_rect(hdc, &left, color, alpha);
+        fill_alpha_rect(hdc, &right, color, alpha);
     }
 }
 
@@ -898,10 +873,30 @@ fn draw_badge(hdc: HDC, x: i32, y: i32, text: &str, color: COLORREF, dpi: u32) {
     }
 }
 
-/// 画像が属するフォルダ（種類）の階層を `area` の左端・縦位置 `top` にパンくず形式で描画する。
+/// 情報表示カード（Iキー）の描画矩形。
+fn info_overlay_rect(win_h: i32, dpi: u32) -> RECT {
+    let info_w = scale_by_dpi(360, dpi);
+    let info_h = scale_by_dpi(110, dpi);
+    let margin = scale_by_dpi(16, dpi);
+    RECT {
+        left: margin,
+        top: win_h - info_h - margin,
+        right: margin + info_w,
+        bottom: win_h - margin,
+    }
+}
+
+/// 画像が属するフォルダ（種類）の階層を `area` の左下にパンくず形式で描画する。
 /// 上位階層は控えめな色、最下層（画像が直接入っているフォルダ）は強調色で区別する。
+/// 情報表示カード（`avoid_rect`）が左下に重なる場合は、その上へ避ける。
 /// 幅が足りない場合は上位階層から「…」に省略し、領域が狭すぎる場合は描画しない。
-fn draw_folder_label(hdc: HDC, segments: &[String], area: &RECT, top: i32, dpi: u32) {
+fn draw_folder_label(
+    hdc: HDC,
+    segments: &[String],
+    area: &RECT,
+    avoid_rect: Option<RECT>,
+    dpi: u32,
+) {
     if segments.is_empty() {
         return;
     }
@@ -910,7 +905,16 @@ fn draw_folder_label(hdc: HDC, segments: &[String], area: &RECT, top: i32, dpi: 
         let pad_x = scale_by_dpi(10, dpi);
         let h = scale_by_dpi(24, dpi);
         let max_w = area.right - area.left - margin * 2;
-        if max_w < scale_by_dpi(48, dpi) || top + h > area.bottom - margin {
+        let mut bottom = area.bottom - margin;
+        if let Some(avoid) = avoid_rect
+            && area.left + margin < avoid.right
+            && bottom > avoid.top
+            && bottom - h < avoid.bottom
+        {
+            bottom = avoid.top - margin;
+        }
+        let top = bottom - h;
+        if max_w < scale_by_dpi(48, dpi) || top < area.top + margin {
             return;
         }
 
@@ -994,15 +998,7 @@ fn draw_folder_label(hdc: HDC, segments: &[String], area: &RECT, top: i32, dpi: 
 
 fn draw_info_overlay(state: &AppState, hdc: HDC, win_h: i32, dpi: u32) {
     unsafe {
-        let info_w = scale_by_dpi(360, dpi);
-        let info_h = scale_by_dpi(110, dpi);
-        let margin = scale_by_dpi(16, dpi);
-        let r = RECT {
-            left: margin,
-            top: win_h - info_h - margin,
-            right: margin + info_w,
-            bottom: win_h - margin,
-        };
+        let r = info_overlay_rect(win_h, dpi);
 
         // Material 3 Frosted Glass Surface
         fill_alpha_rect(hdc, &r, M3_SURFACE_CARD, 210);
@@ -1769,31 +1765,68 @@ fn draw_shortcuts_modal(hdc: HDC, win_w: i32, win_h: i32, dpi: u32) {
             ("Ctrl+O", "フォルダ選択"),
             ("Ctrl+Shift+O", "ファイルの場所を開く"),
             ("F5", "再読込"),
-            ("I / F", "情報表示 / フォルダ名常時表示 切替"),
+            ("I / F", "情報表示 / フォルダ階層表示 切替"),
             ("F11 / Alt+Enter", "全画面切替"),
             ("Esc", "閉じる"),
         ];
 
-        let line_h = scale_by_dpi(17, dpi);
-        let split_x = bx + scale_by_dpi(240, dpi);
+        // 2列レイアウトで縦横ともにダイアログ内へ収める
+        let pad_x = scale_by_dpi(24, dpi);
+        let col_gap = scale_by_dpi(28, dpi);
+        let key_desc_gap = scale_by_dpi(8, dpi);
+        let content_top = by + scale_by_dpi(60, dpi);
+        let content_bottom = layout.close_btn_rect.top - scale_by_dpi(14, dpi);
+        let content_h = (content_bottom - content_top).max(1);
+
+        let left_count = lines.len().div_ceil(2);
+        let line_h = (content_h / left_count as i32)
+            .min(scale_by_dpi(23, dpi))
+            .max(scale_by_dpi(14, dpi));
+        let inner_w = (box_w - pad_x * 2).max(1);
+        let col_w = ((inner_w - col_gap) / 2).max(1);
+        let key_w = (col_w * 42 / 100).max(scale_by_dpi(80, dpi));
+
+        // 中央の区切り線
+        let vdiv_x = bx + pad_x + col_w + col_gap / 2;
+        let vdiv_r = RECT {
+            left: vdiv_x,
+            top: content_top,
+            right: vdiv_x + 1,
+            bottom: (content_top + (left_count as i32) * line_h).min(content_bottom),
+        };
+        let vdiv_brush = CreateSolidBrush(M3_OUTLINE_VARIANT);
+        let _ = FillRect(hdc, &vdiv_r, vdiv_brush);
+        let _ = DeleteObject(vdiv_brush.into());
+
+        let fmt = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX;
         for (i, (key, desc)) in lines.iter().enumerate() {
-            let row_top = by + scale_by_dpi(58, dpi) + (i as i32) * line_h;
+            let (col, row) = if i < left_count {
+                (0, i)
+            } else {
+                (1, i - left_count)
+            };
+            let row_top = content_top + (row as i32) * line_h;
+            if row_top + line_h > content_bottom {
+                continue;
+            }
+            let col_left = bx + pad_x + col * (col_w + col_gap);
+            let col_right = col_left + col_w;
             let mut lr_key = RECT {
-                left: bx + scale_by_dpi(24, dpi),
+                left: col_left,
                 top: row_top,
-                right: split_x,
+                right: (col_left + key_w).min(col_right),
                 bottom: row_top + line_h,
             };
             let mut lr_desc = RECT {
-                left: split_x,
+                left: (col_left + key_w + key_desc_gap).min(col_right),
                 top: row_top,
-                right: bx + box_w - scale_by_dpi(24, dpi),
+                right: col_right,
                 bottom: row_top + line_h,
             };
             let _ = SetTextColor(hdc, M3_PRIMARY_ACCENT);
-            draw_text(hdc, key, &mut lr_key, DT_LEFT | DT_SINGLELINE);
+            draw_text(hdc, key, &mut lr_key, fmt);
             let _ = SetTextColor(hdc, M3_TEXT_SECONDARY);
-            draw_text(hdc, desc, &mut lr_desc, DT_LEFT | DT_SINGLELINE);
+            draw_text(hdc, desc, &mut lr_desc, fmt);
         }
 
         let cl_w = layout.close_btn_rect.right - layout.close_btn_rect.left;

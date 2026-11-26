@@ -28,13 +28,9 @@ impl LibraryRequest {
                     return Err(format!("非対応のファイル形式です: {}", path.display()));
                 }
                 let folder = path.parent().unwrap_or(&path).to_owned();
-                let message = format!("ファイルを開きました: {}", path.display());
-                (folder, Some(path), Some(message))
+                (folder, Some(path), None)
             }
-            Self::Open(path) => {
-                let message = format!("フォルダを開きました: {}", path.display());
-                (path, None, Some(message))
-            }
+            Self::Open(path) => (path, None, None),
             Self::Restore(folder, selection) => (folder, selection, None),
             Self::Reload(folder, selection) => {
                 (folder, selection, Some("フォルダを再読込しました".into()))
